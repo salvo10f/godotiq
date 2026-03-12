@@ -2,6 +2,21 @@
 
 All notable changes to GodotIQ will be documented in this file.
 
+## [0.1.1] - 2026-03-12
+
+### Fixed
+- `godotiq_run` no longer blocks on script errors — launches the game and includes warnings in the response
+- `_check_scripts_valid()` uses `script.reload()` instead of `can_instantiate()` to eliminate false positives
+- `godotiq_ping` now returns `"license": "pro"` or `"community"` in the response
+- `plugin.cfg` version corrected from `2.0.0` to `0.1.1`
+- Addon `ADDON_VERSION` constant updated to match package version
+- License logging cleaned up — uses `logger.info()` instead of `print()`, removed verbose org/url from default output
+- Cross-platform license cache path — uses `%APPDATA%` on Windows, `~/.config/godotiq` on macOS/Linux
+
+### Added
+- Editor bottom panel showing GodotIQ version, WebSocket connection status, and tool count
+- Status label updates automatically on client connect/disconnect
+
 ## [0.1.0] - 2026-03-12
 
 ### Initial Release

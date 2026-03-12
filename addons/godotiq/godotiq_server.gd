@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "2.0.0"
+const ADDON_VERSION := "0.1.0"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -24,6 +24,7 @@ var _next_peer_id: int = 1
 var _port: int = DEFAULT_PORT
 var debugger  # untyped — set by godotiq_plugin.gd
 var undo_redo  # untyped — set by godotiq_plugin.gd (EditorUndoRedoManager)
+var status_label: Label  # Bottom panel status label — set by godotiq_plugin.gd
 var _godotiq_action_history: Array = []
 const MAX_HISTORY_SIZE: int = 50
 var _recent_errors: Array = []
@@ -62,8 +63,11 @@ func _ready() -> void:
 	var err := _tcp_server.listen(_port, "127.0.0.1")
 	if err == OK:
 		print("GodotIQ: WebSocket server listening on 127.0.0.1:%d" % _port)
+		_update_status_label()
 	else:
 		push_error("GodotIQ: Failed to start WebSocket server on port %d (error %d)" % [_port, err])
+		if status_label:
+			status_label.text = "Server: Failed to start (port %d)" % _port
 	# Logger registration (Godot 4.5+ only)
 	if ClassDB.class_exists("Logger"):
 		var logger_script = load("res://addons/godotiq/godotiq_logger.gd")
@@ -78,6 +82,15 @@ func _ready() -> void:
 
 func get_port() -> int:
 	return _port
+
+
+func _update_status_label() -> void:
+	if status_label == null:
+		return
+	if _peers.size() > 0:
+		status_label.text = "Server: Connected (port %d)" % _port
+	else:
+		status_label.text = "Server: Listening (port %d)" % _port
 
 
 func _load_port_from_config() -> int:
@@ -114,6 +127,7 @@ func _process(_delta: float) -> void:
 			_next_peer_id += 1
 			_peers[peer_id] = ws
 			_peer_tcp[peer_id] = tcp
+			_update_status_label()
 		else:
 			push_warning("GodotIQ: Failed to accept WebSocket stream (error %d)" % err)
 
@@ -136,6 +150,8 @@ func _process(_delta: float) -> void:
 	for peer_id in to_remove:
 		_peers.erase(peer_id)
 		_peer_tcp.erase(peer_id)
+	if to_remove.size() > 0:
+		_update_status_label()
 
 	# 4. Process deferred editor screenshot
 	if _pending_screenshot != null:
@@ -158,6 +174,7 @@ func _process(_delta: float) -> void:
 			"timeout_at": Time.get_ticks_msec() + int(s.get("timeout", 15.0) * 1000),
 			"scene": s.get("scene_path", ""),
 			"main_scene_set": s.get("main_scene_set", false),
+			"script_warnings": s.get("script_warnings", []),
 		}
 
 	# 4b. Poll for scene play confirmation
@@ -169,6 +186,9 @@ func _process(_delta: float) -> void:
 			var resp := {"action": "play", "success": true, "scene": r.get("scene", ""), "waited_seconds": waited}
 			if r.get("main_scene_set", false):
 				resp["main_scene_set"] = true
+			var sw = r.get("script_warnings", [])
+			if sw.size() > 0:
+				resp["script_warnings"] = sw
 			send_response(r["peer_id"], r["id"], resp)
 		elif Time.get_ticks_msec() > r["timeout_at"]:
 			_pending_run = null
@@ -398,13 +418,7 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 		if not seen.has(p):
 			seen[p] = true
 			unique_paths.append(p)
-	var errors := _check_scripts_valid(unique_paths)
-	if errors.size() > 0:
-		_send_error(
-			peer_id, id, "SCRIPT_ERRORS",
-			"Cannot start game: %d script(s) have errors. Use godotiq_check_errors for details." % errors.size()
-		)
-		return
+	var script_warnings := _check_scripts_valid(unique_paths)
 
 	# Step 4: Auto-set main scene if empty
 	var main_scene_set: bool = false
@@ -430,6 +444,7 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 			"scene_path": resolved_path,
 			"timeout": timeout,
 			"main_scene_set": main_scene_set,
+			"script_warnings": script_warnings,
 		}
 	else:
 		# Scene already open — play immediately
@@ -441,6 +456,7 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 			"timeout_at": Time.get_ticks_msec() + int(timeout * 1000),
 			"scene": resolved_path,
 			"main_scene_set": main_scene_set,
+			"script_warnings": script_warnings,
 		}
 
 
@@ -486,8 +502,10 @@ func _check_scripts_valid(script_paths: Array[String]) -> Array[Dictionary]:
 		var res = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
 		if res == null:
 			errors.append({"file": path, "error": "Failed to load script"})
-		elif res is GDScript and not res.can_instantiate():
-			errors.append({"file": path, "error": "Script has compilation errors"})
+		elif res is GDScript:
+			var err: int = res.reload()
+			if err != OK:
+				errors.append({"file": path, "error": "Script reload failed (error %d)" % err})
 	return errors
 
 
