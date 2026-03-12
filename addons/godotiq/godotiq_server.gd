@@ -35,6 +35,7 @@ const MAX_SCRIPT_ERRORS: int = 50
 var _error_logger  # Variant — null if Logger unavailable
 var _has_logger: bool = false
 var _checking_errors: bool = false
+var _update_checked: bool = false
 
 
 func _clear_script_errors() -> void:
@@ -78,6 +79,48 @@ func _ready() -> void:
 			print("GodotIQ: Logger registered (Godot 4.5+)")
 		else:
 			push_warning("GodotIQ: Logger class exists but godotiq_logger.gd failed to load")
+	# One-time update check against PyPI
+	if not _update_checked:
+		_update_checked = true
+		_check_for_update()
+
+
+func _check_for_update() -> void:
+	var http := HTTPRequest.new()
+	http.timeout = 10.0
+	add_child(http)
+	http.request_completed.connect(_on_update_check_completed.bind(http))
+	var err := http.request("https://pypi.org/pypi/godotiq/json")
+	if err != OK:
+		http.queue_free()
+
+
+func _on_update_check_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray, http: HTTPRequest) -> void:
+	http.queue_free()
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		return
+	var parsed = JSON.parse_string(body.get_string_from_utf8())
+	if parsed == null or not parsed.has("info") or not parsed["info"].has("version"):
+		return
+	var remote_version: String = parsed["info"]["version"]
+	if _is_newer_version(remote_version, ADDON_VERSION):
+		print("GodotIQ: Update available — v%s (current: v%s)" % [remote_version, ADDON_VERSION])
+		if status_label:
+			status_label.text = "GodotIQ v%s — Update available: v%s (pip install --upgrade godotiq && godotiq install-addon .)" % [ADDON_VERSION, remote_version]
+
+
+func _is_newer_version(remote: String, local: String) -> bool:
+	var r := remote.split(".")
+	var l := local.split(".")
+	var max_len := max(r.size(), l.size())
+	for i in range(max_len):
+		var rv: int = int(r[i]) if i < r.size() else 0
+		var lv: int = int(l[i]) if i < l.size() else 0
+		if rv > lv:
+			return true
+		if rv < lv:
+			return false
+	return false
 
 
 func get_port() -> int:
