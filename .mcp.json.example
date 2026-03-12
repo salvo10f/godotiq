@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "godotiq": {
+      "command": "uvx",
+      "args": ["godotiq"],
+      "env": {
+        "GODOTIQ_PROJECT_ROOT": "/path/to/your/godot/project"
+      }
+    }
+  }
+}
