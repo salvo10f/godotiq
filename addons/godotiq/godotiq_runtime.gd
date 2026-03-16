@@ -111,7 +111,7 @@ func _on_debugger_message(message: String, data: Array) -> bool:
 	return false
 
 
-func _take_screenshot(params: Dictionary) -> void:
+func _take_screenshot(params: Dictionary):
 	await get_tree().process_frame
 
 	var viewport := get_viewport()
@@ -191,7 +191,7 @@ func _send_perf_snapshot() -> void:
 	EngineDebugger.send_message("godotiq:perf_result", [JSON.stringify(result)])
 
 
-func _simulate_input(params: Dictionary) -> void:
+func _simulate_input(params: Dictionary):
 	if _input_in_progress:
 		EngineDebugger.send_message("godotiq:input_result", [JSON.stringify({
 			"success": false,
