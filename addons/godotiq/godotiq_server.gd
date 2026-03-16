@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.1.5"
+const ADDON_VERSION := "0.1.6"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -70,11 +70,12 @@ func _ready() -> void:
 		if status_label:
 			status_label.text = "Server: Failed to start (port %d)" % _port
 	# Logger registration (Godot 4.5+ only)
-	if ClassDB.class_exists("Logger"):
+	# Use call() for OS.add_logger — avoids compile error on Godot versions without it
+	if ClassDB.class_exists("Logger") and OS.has_method("add_logger"):
 		var logger_script = load("res://addons/godotiq/godotiq_logger.gd")
 		if logger_script:
 			_error_logger = logger_script.new(self)
-			OS.add_logger(_error_logger)
+			OS.call("add_logger", _error_logger)
 			_has_logger = true
 			print("GodotIQ: Logger registered (Godot 4.5+)")
 		else:
