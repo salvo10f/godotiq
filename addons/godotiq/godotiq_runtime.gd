@@ -132,6 +132,16 @@ func _take_screenshot(params: Dictionary) -> void:
 	var scale: float = clampf(params.get("scale", 0.5), 0.1, 1.0)
 	var quality: float = clampf(params.get("quality", 0.5), 0.1, 1.0)
 	var fmt: String = params.get("format", "webp")
+	var region: Array = params.get("region", [])
+
+	# Apply region crop before scaling
+	if region.size() == 4:
+		var rx: int = clampi(int(region[0]), 0, img.get_width())
+		var ry: int = clampi(int(region[1]), 0, img.get_height())
+		var rw: int = clampi(int(region[2]), 1, img.get_width() - rx)
+		var rh: int = clampi(int(region[3]), 1, img.get_height() - ry)
+		img = img.get_region(Rect2i(rx, ry, rw, rh))
+
 	var w := img.get_width()
 	var h := img.get_height()
 
@@ -315,6 +325,15 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 
 		return {"type": "key", "key": key_name, "hold_ms": hold_ms, "ok": true}
 
+	if cmd.has("mouse_motion"):
+		var motion_data: Dictionary = cmd["mouse_motion"]
+		var rel_x: float = float(motion_data.get("relative_x", 0))
+		var rel_y: float = float(motion_data.get("relative_y", 0))
+		var event := InputEventMouseMotion.new()
+		event.relative = Vector2(rel_x, rel_y)
+		Input.parse_input_event(event)
+		return {"type": "mouse_motion", "relative_x": rel_x, "relative_y": rel_y, "ok": true}
+
 	if cmd.has("tap"):
 		var target_name: String = cmd["tap"]
 		var target_node := _find_ui_node(target_name)
@@ -482,7 +501,7 @@ func _execute_code(params: Dictionary) -> void:
 		EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
 			"status": "COMPILE_ERROR",
 			"result": "",
-			"error": "Compilation failed (error %d)" % err,
+			"error": "Compilation failed (error %d: %s)" % [err, error_string(err)],
 		})])
 		return
 
