@@ -62,7 +62,7 @@ func _create_bottom_panel() -> Control:
 	vbox.custom_minimum_size = Vector2(0, 80)
 
 	var title := Label.new()
-	title.text = "GodotIQ v0.1.0"
+	title.text = "GodotIQ v%s" % _server.ADDON_VERSION
 	title.add_theme_font_size_override("font_size", 16)
 	vbox.add_child(title)
 

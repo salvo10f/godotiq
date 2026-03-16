@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.1.6"
+const ADDON_VERSION := "0.1.8"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -1106,7 +1106,7 @@ func _value_to_json(value) -> Variant:
 			dict[str(key)] = _value_to_json(value[key])
 		return dict
 	if value is Transform3D:
-		var b := value.basis
+		var b: Basis = value.basis
 		return {
 			"origin": [snapped(value.origin.x, 0.001), snapped(value.origin.y, 0.001), snapped(value.origin.z, 0.001)],
 			"basis": [
