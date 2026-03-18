@@ -108,6 +108,16 @@ func _on_debugger_message(message: String, data: Array) -> bool:
 				ui_map_params = data[0]
 			_handle_ui_map(ui_map_params)
 			return true
+		"explore_camera":
+			var explore_params = {}
+			if data.size() > 0 and data[0] is String:
+				var parsed_explore = JSON.parse_string(data[0])
+				if parsed_explore is Dictionary:
+					explore_params = parsed_explore
+			elif data.size() > 0 and data[0] is Dictionary:
+				explore_params = data[0]
+			_handle_explore_camera(explore_params)
+			return true
 	return false
 
 
@@ -1087,3 +1097,104 @@ func _collect_ui_stats_flat(items: Array, touch_too_small: Array) -> void:
 
 func _collect_ui_stats(_items: Array, _interactive_count: int, _touch_too_small: Array) -> void:
 	pass
+
+
+# --- Explore camera ---
+
+func _handle_explore_camera(params: Dictionary) -> void:
+	var action: String = params.get("action", "")
+	var scene_root := get_tree().root
+	if scene_root == null:
+		EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+			"error": "No scene tree root available",
+			"code": "NO_SCENE_ROOT",
+		})])
+		return
+
+	match action:
+		"create":
+			# Clean up any existing drone camera first (use free() not queue_free()
+			# to avoid name deduplication when the new drone is added immediately)
+			var existing = scene_root.get_node_or_null("GodotIQ_DroneCam")
+			if existing:
+				existing.free()
+
+			# Store reference to current camera before switching
+			var original_cam: Camera3D = get_viewport().get_camera_3d()
+			var original_cam_path := ""
+			if original_cam:
+				original_cam_path = str(scene_root.get_path_to(original_cam))
+
+			# Create drone
+			var drone := Camera3D.new()
+			drone.name = "GodotIQ_DroneCam"
+			drone.set_meta("original_camera_path", original_cam_path)
+			drone.fov = float(params.get("fov", 70.0))
+			scene_root.add_child(drone)
+			drone.make_current()
+
+			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+				"status": "created",
+				"original_camera": original_cam_path,
+			})])
+
+		"move":
+			var drone = scene_root.get_node_or_null("GodotIQ_DroneCam")
+			if drone == null:
+				EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+					"error": "GodotIQ_DroneCam not found",
+					"code": "DRONE_NOT_FOUND",
+				})])
+				return
+
+			var pos: Array = params.get("position", [0, 0, 0])
+			drone.global_position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+
+			if params.has("look_at"):
+				var target_arr: Array = params["look_at"]
+				var target := Vector3(float(target_arr[0]), float(target_arr[1]), float(target_arr[2]))
+				var dist: float = drone.global_position.distance_to(target)
+				if dist > 0.001:
+					var direction: Vector3 = (target - drone.global_position).normalized()
+					if abs(direction.dot(Vector3.UP)) > 0.99:
+						drone.look_at(target, Vector3.FORWARD)
+					else:
+						drone.look_at(target, Vector3.UP)
+			elif params.has("rotation"):
+				var rot: Array = params["rotation"]
+				drone.rotation_degrees = Vector3(float(rot[0]), float(rot[1]), float(rot[2]))
+
+			if params.has("fov"):
+				drone.fov = float(params["fov"])
+
+			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+				"status": "moved",
+				"position": [drone.global_position.x, drone.global_position.y, drone.global_position.z],
+				"rotation": [drone.rotation_degrees.x, drone.rotation_degrees.y, drone.rotation_degrees.z],
+			})])
+
+		"destroy":
+			var drone = scene_root.get_node_or_null("GodotIQ_DroneCam")
+			if drone == null:
+				EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+					"status": "destroyed",
+				})])
+				return
+
+			var original_path: String = drone.get_meta("original_camera_path", "")
+			if original_path != "":
+				var original_cam = scene_root.get_node_or_null(original_path)
+				if is_instance_valid(original_cam) and original_cam is Camera3D:
+					original_cam.make_current()
+
+			drone.queue_free()
+
+			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+				"status": "destroyed",
+			})])
+
+		_:
+			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+				"error": "Unknown action: %s" % action,
+				"code": "UNKNOWN_ACTION",
+			})])

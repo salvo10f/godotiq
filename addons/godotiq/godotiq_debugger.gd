@@ -40,6 +40,9 @@ func _capture(message: String, data: Array, session_id: int) -> bool:
 		"godotiq:ui_map_result":
 			server.handle_game_response("godotiq:query_ui_map", data)
 			return true
+		"godotiq:explore_camera_result":
+			server.handle_game_response("godotiq:explore_camera", data)
+			return true
 		"godotiq:error":
 			if data.size() >= 1:
 				server._record_error(str(data[0]))
