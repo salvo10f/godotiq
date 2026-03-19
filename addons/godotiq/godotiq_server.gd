@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.3.1"
+const ADDON_VERSION := "0.3.2"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -22,6 +22,7 @@ var _pending_scene_open = null  # Deferred scene open + play {peer_id, id, scene
 var _game_running: bool = false
 var _next_peer_id: int = 1
 var _port: int = DEFAULT_PORT
+var _bridge_token: String = ""
 var debugger  # untyped — set by godotiq_plugin.gd
 var undo_redo  # untyped — set by godotiq_plugin.gd (EditorUndoRedoManager)
 var status_label: Label  # Bottom panel status label — set by godotiq_plugin.gd
@@ -60,6 +61,9 @@ func _get_script_errors() -> Array:
 
 func _ready() -> void:
 	_port = _load_port_from_config()
+	_bridge_token = _load_or_create_bridge_token()
+	if _bridge_token.is_empty():
+		push_error("GodotIQ: Bridge token unavailable. Requests will be rejected until res://.godotiq/bridge_token can be created.")
 	_tcp_server = TCPServer.new()
 	var err := _tcp_server.listen(_port, "127.0.0.1")
 	if err == OK:
@@ -131,6 +135,9 @@ func get_port() -> int:
 func _update_status_label() -> void:
 	if status_label == null:
 		return
+	if _bridge_token.is_empty():
+		status_label.text = "Server: Auth unavailable (.godotiq/bridge_token)"
+		return
 	if _peers.size() > 0:
 		status_label.text = "Server: Connected (port %d)" % _port
 	else:
@@ -153,6 +160,48 @@ func _load_port_from_config() -> int:
 			if port is int or port is float:
 				return int(port)
 	return DEFAULT_PORT
+
+
+func _load_or_create_bridge_token() -> String:
+	var token_path := "res://.godotiq/bridge_token"
+	if FileAccess.file_exists(token_path):
+		var existing_file := FileAccess.open(token_path, FileAccess.READ)
+		if existing_file != null:
+			var existing := existing_file.get_as_text().strip_edges()
+			existing_file.close()
+			if not existing.is_empty():
+				return existing
+
+	var dir_err := DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path("res://.godotiq")
+	)
+	if dir_err != OK and dir_err != ERR_ALREADY_EXISTS:
+		push_warning("GodotIQ: Failed to prepare .godotiq dir for bridge token")
+		return ""
+
+	var token := _generate_bridge_token()
+	var file := FileAccess.open(token_path, FileAccess.WRITE)
+	if file == null:
+		push_warning("GodotIQ: Failed to persist bridge token")
+		return ""
+	file.store_string(token)
+	file.close()
+	return token
+
+
+func _generate_bridge_token() -> String:
+	if ClassDB.class_exists("Crypto"):
+		var crypto := Crypto.new()
+		var bytes := crypto.generate_random_bytes(32)
+		if bytes.size() > 0:
+			return bytes.hex_encode()
+
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var token := ""
+	for _i in range(4):
+		token += "%08x" % rng.randi()
+	return token
 
 
 func _process(_delta: float) -> void:
@@ -263,6 +312,16 @@ func _handle_message(peer_id: int, text: String) -> void:
 	var params: Dictionary = parsed.get("params", {})
 	if not (params is Dictionary):
 		params = {}
+	var token: String = str(parsed.get("token", ""))
+	if _bridge_token.is_empty():
+		_bridge_token = _load_or_create_bridge_token()
+		if _bridge_token.is_empty():
+			_update_status_label()
+			_send_error(peer_id, id, "AUTH_UNAVAILABLE", "Bridge token unavailable on addon side")
+			return
+	if token != _bridge_token:
+		_send_error(peer_id, id, "AUTH_ERROR", "Invalid or missing bridge token")
+		return
 	_dispatch(peer_id, id, method, params)
 
 
