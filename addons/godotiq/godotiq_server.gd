@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.3.2"
+const ADDON_VERSION := "0.3.5"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -15,7 +15,7 @@ var _exec_counter: int = 0
 var _tcp_server: TCPServer
 var _peers: Dictionary = {}          # peer_id -> WebSocketPeer
 var _peer_tcp: Dictionary = {}       # peer_id -> StreamPeerTCP (prevent GC)
-var _pending_game_requests: Dictionary = {}  # request_id -> {peer_id, method, timeout_at}
+var _pending_game_requests: Dictionary = {}  # req_key ("peer:id") -> {peer_id, request_id, method, timeout_at}
 var _pending_screenshot = null  # Deferred editor screenshot capture data
 var _pending_run = null  # Poll for scene play confirmation {peer_id, id, timeout_at, started_at}
 var _pending_scene_open = null  # Deferred scene open + play {peer_id, id, scene_path, timeout}
@@ -266,7 +266,7 @@ func _process(_delta: float) -> void:
 			"started_at": Time.get_ticks_msec(),
 			"timeout_at": Time.get_ticks_msec() + int(s.get("timeout", 15.0) * 1000),
 			"scene": s.get("scene_path", ""),
-			"main_scene_set": s.get("main_scene_set", false),
+			"main_scene_empty": s.get("main_scene_empty", false),
 			"script_warnings": s.get("script_warnings", []),
 		}
 
@@ -277,8 +277,9 @@ func _process(_delta: float) -> void:
 			_pending_run = null
 			var waited: float = (Time.get_ticks_msec() - r.get("started_at", Time.get_ticks_msec())) / 1000.0
 			var resp := {"action": "play", "success": true, "scene": r.get("scene", ""), "waited_seconds": waited}
-			if r.get("main_scene_set", false):
-				resp["main_scene_set"] = true
+			if r.get("main_scene_empty", false):
+				resp["main_scene_empty"] = true
+				resp["hint"] = "No main_scene set. Use set_main_scene to configure."
 			var sw = r.get("script_warnings", [])
 			if sw.size() > 0:
 				resp["script_warnings"] = sw
@@ -346,7 +347,8 @@ func _dispatch(peer_id: int, id: String, method: String, params: Dictionary) -> 
 		"input":
 			_handle_game_forward(peer_id, id, "godotiq:input", params, INPUT_TIMEOUT_MS)
 		"exec":
-			_handle_game_forward(peer_id, id, "godotiq:exec", params, EXEC_TIMEOUT_MS)
+			var exec_timeout_ms: int = int(params.get("timeout_ms", EXEC_TIMEOUT_MS))
+			_handle_game_forward(peer_id, id, "godotiq:exec", params, exec_timeout_ms)
 		"state_inspect":
 			_handle_game_forward(peer_id, id, "godotiq:query_state", params, STATE_TIMEOUT_MS)
 		"nav_query":
@@ -525,13 +527,12 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 			unique_paths.append(p)
 	var script_warnings := _check_scripts_valid(unique_paths)
 
-	# Step 4: Auto-set main scene if empty
-	var main_scene_set: bool = false
+	# Step 4: Check if main scene is empty (report only, do NOT auto-write)
+	var main_scene_empty: bool = false
 	if not is_current and resolved_path != "":
 		var current_main: String = ProjectSettings.get_setting("application/run/main_scene", "")
 		if current_main == "":
-			_set_main_scene_internal(resolved_path)
-			main_scene_set = true
+			main_scene_empty = true
 
 	# Step 5: Read timeout
 	var timeout: float = float(params.get("timeout", 15.0))
@@ -548,7 +549,7 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 			"id": id,
 			"scene_path": resolved_path,
 			"timeout": timeout,
-			"main_scene_set": main_scene_set,
+			"main_scene_empty": main_scene_empty,
 			"script_warnings": script_warnings,
 		}
 	else:
@@ -560,7 +561,7 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 			"started_at": Time.get_ticks_msec(),
 			"timeout_at": Time.get_ticks_msec() + int(timeout * 1000),
 			"scene": resolved_path,
-			"main_scene_set": main_scene_set,
+			"main_scene_empty": main_scene_empty,
 			"script_warnings": script_warnings,
 		}
 
@@ -1234,7 +1235,7 @@ func _handle_undo_history(peer_id: int, id: String, _params: Dictionary) -> void
 
 func _handle_exec_editor(peer_id: int, id: String, params: Dictionary) -> void:
 	var code: String = params.get("code", "")
-	var timeout_ms: int = params.get("timeout_ms", 5000)
+	# timeout_ms is enforced by the Python bridge timeout; editor execution here is synchronous.
 
 	if code.is_empty():
 		_send_error(peer_id, id, "EXEC_ERROR", "No code provided")
@@ -1250,8 +1251,14 @@ func _handle_exec_editor(peer_id: int, id: String, params: Dictionary) -> void:
 		return
 
 	# Safety: blocked patterns
+	# Safety: blocked patterns — keep in sync with godotiq_runtime.gd and Python exec_code._BLOCKED_PATTERNS
+	# Note: DirAccess.remove also catches DirAccess.remove_absolute() via substring match
 	var blocked_patterns: Array = [
 		"DirAccess.remove",
+		"DirAccess.open",
+		"FileAccess.open",
+		"FileAccess.get_file_as_string",
+		"FileAccess.get_file_as_bytes",
 		"OS.execute",
 		"OS.kill",
 		"OS.shell_open",
@@ -1737,14 +1744,30 @@ func _expand_build_pattern(params: Dictionary) -> Array:
 		var off_x: float = float(offset[0])
 		var off_y: float = float(offset[1])
 		var off_z: float = float(offset[2])
+		var index: int = 0
 		for item in items:
 			if item is Dictionary and item.has("position"):
 				var pos: Array = item["position"]
 				item["position"] = [float(pos[0]) + off_x, float(pos[1]) + off_y, float(pos[2]) + off_z]
+			if item is Dictionary and not item.has("name"):
+				item["name"] = "%s_%d" % [_build_spec_name_prefix(item), index]
+			index += 1
 		return items
 	if params.has("nodes"):
 		return params["nodes"]
 	return []
+
+
+func _build_spec_name_prefix(spec: Dictionary) -> String:
+	if spec.has("prefix"):
+		return str(spec["prefix"])
+	var scene_path: String = str(spec.get("scene", ""))
+	if scene_path != "":
+		return scene_path.get_file().get_basename()
+	var type_name: String = str(spec.get("type", ""))
+	if type_name != "":
+		return type_name
+	return "BuildNode"
 
 
 func _expand_build_grid(grid: Dictionary, offset: Array = [0, 0, 0]) -> Array:
@@ -1924,7 +1947,11 @@ func _create_build_node(spec: Dictionary, parent: Node, scene_root: Node, ur) ->
 		return {"ok": false, "error": "Spec must have 'scene' or 'type'"}
 
 	# Set name
-	var node_name: String = str(spec.get("name", "BuildNode"))
+	var node_name: String = str(spec.get("name", ""))
+	if node_name == "":
+		node_name = _build_spec_name_prefix(spec)
+		if scene_path != "" and new_node.name != "":
+			node_name = str(new_node.name)
 	new_node.name = node_name
 
 	# Register with undo/redo (deferred)
@@ -1977,38 +2004,55 @@ func _handle_game_forward(peer_id: int, id: String, msg_type: String, params: Di
 		"method": msg_type,
 		"timeout_at": Time.get_ticks_msec() + timeout_ms,
 	}
-	debugger.send_to_game(msg_type, [JSON.stringify(params)])
+	var forward_params: Dictionary = params.duplicate(true)
+	forward_params["_request_id"] = req_key
+	debugger.send_to_game(msg_type, [JSON.stringify(forward_params)])
 
 
 func handle_game_response(response_type: String, data: Array) -> void:
-	# Find matching pending request by method
-	var matched_id := ""
-	for req_id in _pending_game_requests:
-		var entry: Dictionary = _pending_game_requests[req_id]
-		if entry["method"] == response_type:
-			matched_id = req_id
-			break
-	if matched_id == "":
-		return  # no matching request — stale or duplicate
-	var entry: Dictionary = _pending_game_requests[matched_id]
-	_pending_game_requests.erase(matched_id)
-
 	var result: Dictionary = {}
-	if response_type == "godotiq:screenshot" and data.size() >= 4:
+	var response_request_id := ""
+	if data.size() >= 1 and data[0] is String:
+		var parsed = JSON.parse_string(data[0])
+		if parsed is Dictionary:
+			result = parsed
+			response_request_id = str(result.get("request_id", ""))
+			result.erase("request_id")
+		else:
+			result = {"raw": data[0]}
+	elif response_type == "godotiq:screenshot" and data.size() >= 4:
 		result = {
 			"image": data[0],
 			"format": data[1],
 			"width": data[2],
 			"height": data[3],
 		}
-	elif data.size() >= 1 and data[0] is String:
-		var parsed = JSON.parse_string(data[0])
-		if parsed is Dictionary:
-			result = parsed
-		else:
-			result = {"raw": data[0]}
 	else:
 		result = {"data": data}
+
+	var matched_id := ""
+	if response_request_id != "":
+		if _pending_game_requests.has(response_request_id):
+			matched_id = response_request_id
+		else:
+			for req_id in _pending_game_requests:
+				var entry_by_request_id: Dictionary = _pending_game_requests[req_id]
+				if entry_by_request_id["method"] == response_type and entry_by_request_id["request_id"] == response_request_id:
+					matched_id = req_id
+					break
+
+	if matched_id == "":
+		for req_id in _pending_game_requests:
+			var entry_by_method: Dictionary = _pending_game_requests[req_id]
+			if entry_by_method["method"] == response_type:
+				matched_id = req_id
+				break
+
+	if matched_id == "":
+		return  # no matching request — stale or duplicate
+
+	var entry: Dictionary = _pending_game_requests[matched_id]
+	_pending_game_requests.erase(matched_id)
 	send_response(entry["peer_id"], entry["request_id"], result)
 
 
@@ -2125,14 +2169,9 @@ func _handle_check_errors(peer_id: int, id: String, params: Dictionary):
 	for i in script_paths.size():
 		var path: String = script_paths[i]
 		var res = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
-		if res == null:
-			basic_errors[path] = {"file": path, "line": 0, "error": "Failed to load script"}
-		elif res is GDScript:
-			if not res.can_instantiate():
-				basic_errors[path] = {"file": path, "line": 0, "error": "Script has parse errors (cannot instantiate)"}
-			var reload_err = res.reload()
-			if reload_err != OK and not basic_errors.has(path):
-				basic_errors[path] = {"file": path, "line": 0, "error": "Script reload failed (error %d)" % reload_err}
+		var basic_error := _check_loaded_script(path, res)
+		if not basic_error.is_empty():
+			basic_errors[path] = basic_error
 		checked += 1
 		if checked % 10 == 0:
 			await get_tree().process_frame
@@ -2172,6 +2211,17 @@ func _handle_check_errors(peer_id: int, id: String, params: Dictionary):
 		"scripts_checked": checked,
 		"scope": scope,
 	})
+
+
+func _check_loaded_script(path: String, script_res) -> Dictionary:
+	if script_res == null:
+		return {"file": path, "line": 0, "error": "Failed to load script"}
+	if not script_res.has_method("reload"):
+		return {}
+	var reload_err: int = int(script_res.reload())
+	if reload_err != OK:
+		return {"file": path, "line": 0, "error": "Script reload failed (error %d)" % reload_err}
+	return {}
 
 
 func _get_script_paths_recursive(dir: EditorFileSystemDirectory) -> Array[String]:

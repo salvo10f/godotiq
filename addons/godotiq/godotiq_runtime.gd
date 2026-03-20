@@ -46,7 +46,14 @@ func _on_debugger_message(message: String, data: Array) -> bool:
 			_take_screenshot(params)
 			return true
 		"query_perf":
-			_send_perf_snapshot()
+			var perf_params = {}
+			if data.size() > 0 and data[0] is String:
+				var parsed_perf = JSON.parse_string(data[0])
+				if parsed_perf is Dictionary:
+					perf_params = parsed_perf
+			elif data.size() > 0 and data[0] is Dictionary:
+				perf_params = data[0]
+			_send_perf_snapshot(perf_params)
 			return true
 		"input":
 			var input_params = {}
@@ -121,22 +128,40 @@ func _on_debugger_message(message: String, data: Array) -> bool:
 	return false
 
 
+func _with_request_id(payload: Dictionary, params: Dictionary) -> Dictionary:
+	var result: Dictionary = payload.duplicate(true)
+	var request_id: String = str(params.get("_request_id", ""))
+	if not request_id.is_empty():
+		result["request_id"] = request_id
+	return result
+
+
+func _send_json_result(channel: String, payload: Dictionary, params: Dictionary = {}) -> void:
+	EngineDebugger.send_message(channel, [JSON.stringify(_with_request_id(payload, params))])
+
+
 func _take_screenshot(params: Dictionary):
 	await get_tree().process_frame
 
 	var viewport := get_viewport()
 	if viewport == null:
-		EngineDebugger.send_message("godotiq:error", ["No viewport available"])
+		_send_json_result("godotiq:screenshot_result", {
+			"error": "No viewport available",
+		}, params)
 		return
 
 	var tex := viewport.get_texture()
 	if tex == null:
-		EngineDebugger.send_message("godotiq:error", ["Viewport texture not available"])
+		_send_json_result("godotiq:screenshot_result", {
+			"error": "Viewport texture not available",
+		}, params)
 		return
 
 	var img := tex.get_image()
 	if img == null:
-		EngineDebugger.send_message("godotiq:error", ["Failed to capture viewport image"])
+		_send_json_result("godotiq:screenshot_result", {
+			"error": "Failed to capture viewport image",
+		}, params)
 		return
 
 	var scale: float = clampf(params.get("scale", 0.5), 0.1, 1.0)
@@ -171,10 +196,15 @@ func _take_screenshot(params: Dictionary):
 			buffer = img.save_webp_to_buffer(true, quality)
 
 	var b64 := Marshalls.raw_to_base64(buffer)
-	EngineDebugger.send_message("godotiq:screenshot_result", [b64, fmt, w, h])
+	_send_json_result("godotiq:screenshot_result", {
+		"image": b64,
+		"format": fmt,
+		"width": w,
+		"height": h,
+	}, params)
 
 
-func _send_perf_snapshot() -> void:
+func _send_perf_snapshot(params: Dictionary = {}) -> void:
 	var result := {
 		"fps": Engine.get_frames_per_second(),
 		"draw_calls": RenderingServer.get_rendering_info(
@@ -198,15 +228,15 @@ func _send_perf_snapshot() -> void:
 		"total_nodes": get_tree().get_node_count(),
 		"orphan_nodes": Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT),
 	}
-	EngineDebugger.send_message("godotiq:perf_result", [JSON.stringify(result)])
+	_send_json_result("godotiq:perf_result", result, params)
 
 
 func _simulate_input(params: Dictionary):
 	if _input_in_progress:
-		EngineDebugger.send_message("godotiq:input_result", [JSON.stringify({
+		_send_json_result("godotiq:input_result", {
 			"success": false,
 			"error": "Another input simulation is already in progress",
-		})])
+		}, params)
 		return
 
 	_input_in_progress = true
@@ -252,7 +282,7 @@ func _simulate_input(params: Dictionary):
 
 	_input_in_progress = false
 
-	EngineDebugger.send_message("godotiq:input_result", [JSON.stringify({
+	_send_json_result("godotiq:input_result", {
 		"success": all_ok,
 		"commands_executed": results.size(),
 		"commands_total": commands.size(),
@@ -260,7 +290,7 @@ func _simulate_input(params: Dictionary):
 		"side_effects": side_effects,
 		"signal_received": signal_received,
 		"signal_data": signal_data,
-	})])
+	}, params)
 
 
 func _wait_for_signal_or_timeout(target: Node, signal_name: String, timeout: float) -> Dictionary:
@@ -401,10 +431,43 @@ func _find_control_recursive(node: Node, target_name: String) -> Control:
 
 
 func _key_name_to_code(key_name: String) -> Key:
-	match key_name.to_upper():
+	var normalized := key_name.strip_edges()
+	if normalized.is_empty():
+		return KEY_NONE
+
+	match normalized.to_upper():
+		"ARROWUP":
+			normalized = "Up"
+		"ARROWDOWN":
+			normalized = "Down"
+		"ARROWLEFT":
+			normalized = "Left"
+		"ARROWRIGHT":
+			normalized = "Right"
+		"SPACEBAR":
+			normalized = "Space"
+		"PAGE UP":
+			normalized = "PageUp"
+		"PAGE DOWN":
+			normalized = "PageDown"
+		"DEL":
+			normalized = "Delete"
+		"ESC":
+			normalized = "Escape"
+		"RETURN":
+			normalized = "Enter"
+		"CONTROL":
+			normalized = "Ctrl"
+
+	if OS.has_method("find_keycode_from_string"):
+		var os_keycode := OS.find_keycode_from_string(normalized)
+		if os_keycode != KEY_NONE:
+			return os_keycode
+
+	match normalized.to_upper():
 		"SPACE": return KEY_SPACE
-		"ENTER", "RETURN": return KEY_ENTER
-		"ESCAPE", "ESC": return KEY_ESCAPE
+		"ENTER": return KEY_ENTER
+		"ESCAPE": return KEY_ESCAPE
 		"TAB": return KEY_TAB
 		"BACKSPACE": return KEY_BACKSPACE
 		"UP": return KEY_UP
@@ -412,17 +475,22 @@ func _key_name_to_code(key_name: String) -> Key:
 		"LEFT": return KEY_LEFT
 		"RIGHT": return KEY_RIGHT
 		"SHIFT": return KEY_SHIFT
-		"CTRL", "CONTROL": return KEY_CTRL
+		"CTRL": return KEY_CTRL
 		"ALT": return KEY_ALT
-		"DELETE", "DEL": return KEY_DELETE
+		"DELETE": return KEY_DELETE
+		"PAGEUP": return KEY_PAGEUP
+		"PAGEDOWN": return KEY_PAGEDOWN
+		"HOME": return KEY_HOME
+		"END": return KEY_END
+		"INSERT": return KEY_INSERT
 		"F1": return KEY_F1
 		"F2": return KEY_F2
 		"F3": return KEY_F3
 		"F4": return KEY_F4
 		"F5": return KEY_F5
 		_:
-			if key_name.length() == 1:
-				return key_name.to_upper().unicode_at(0)
+			if normalized.length() == 1:
+				return normalized.to_upper().unicode_at(0)
 	return KEY_NONE
 
 
@@ -472,56 +540,61 @@ func _execute_code(params: Dictionary) -> void:
 	var timeout_ms: int = params.get("timeout_ms", 5000)
 
 	if code.is_empty():
-		EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
+		_send_json_result("godotiq:exec_result", {
 			"status": "ERROR",
 			"result": "",
 			"error": "No code provided",
-		})])
+		}, params)
 		return
 
 	var trimmed := code.strip_edges()
 	if not trimmed.begins_with("func run():") and not trimmed.begins_with("func run() ->"):
-		EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
+		_send_json_result("godotiq:exec_result", {
 			"status": "BLOCKED",
 			"result": "",
 			"error": "Code must start with 'func run():' or 'func run() -> Type:'",
-		})])
+		}, params)
 		return
 
+	# Safety: blocked patterns — keep in sync with godotiq_server.gd and Python exec_code._BLOCKED_PATTERNS
+	# Note: DirAccess.remove also catches DirAccess.remove_absolute() via substring match
 	var blocked_patterns: Array = [
 		"DirAccess.remove",
+		"DirAccess.open",
+		"FileAccess.open",
+		"FileAccess.get_file_as_string",
+		"FileAccess.get_file_as_bytes",
 		"OS.execute",
 		"OS.kill",
 		"OS.shell_open",
-		"FileAccess.open",
 	]
 	for pattern in blocked_patterns:
 		if code.find(pattern) != -1:
-			EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
+			_send_json_result("godotiq:exec_result", {
 				"status": "BLOCKED",
 				"result": "",
 				"error": "Blocked pattern found: %s" % pattern,
-			})])
+			}, params)
 			return
 
 	var script := GDScript.new()
 	script.source_code = "@tool\nextends RefCounted\n\n" + code
 	var err := script.reload()
 	if err != OK:
-		EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
+		_send_json_result("godotiq:exec_result", {
 			"status": "COMPILE_ERROR",
 			"result": "",
 			"error": "Compilation failed (error %d: %s)" % [err, error_string(err)],
-		})])
+		}, params)
 		return
 
 	var obj = script.new()
 	if obj == null:
-		EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
+		_send_json_result("godotiq:exec_result", {
 			"status": "ERROR",
 			"result": "",
 			"error": "Failed to instantiate script",
-		})])
+		}, params)
 		return
 
 	var result = obj.run()
@@ -531,29 +604,29 @@ func _execute_code(params: Dictionary) -> void:
 	else:
 		result_str = "null"
 
-	EngineDebugger.send_message("godotiq:exec_result", [JSON.stringify({
+	_send_json_result("godotiq:exec_result", {
 		"status": "OK",
 		"result": result_str,
 		"error": "",
-	})])
+	}, params)
 
 
 func _query_state(params: Dictionary) -> void:
 	var queries: Array = params.get("queries", [])
 	if queries.is_empty():
-		EngineDebugger.send_message("godotiq:state_result", [JSON.stringify({
+		_send_json_result("godotiq:state_result", {
 			"results": [],
 			"error": "No queries provided",
-		})])
+		}, params)
 		return
 
 	var results: Array = []
 	for query in queries:
 		results.append(_resolve_state_query(query))
 
-	EngineDebugger.send_message("godotiq:state_result", [JSON.stringify({
+	_send_json_result("godotiq:state_result", {
 		"results": results,
-	})])
+	}, params)
 
 
 func _resolve_state_query(query: Dictionary) -> Dictionary:
@@ -675,9 +748,9 @@ func _find_node_recursive(node: Node, target_name: String) -> Node:
 func _handle_nav_query(params: Dictionary) -> void:
 	var world := get_tree().root.get_world_3d()
 	if world == null:
-		EngineDebugger.send_message("godotiq:nav_result", [JSON.stringify({
+		_send_json_result("godotiq:nav_result", {
 			"error": "No World3D available",
-		})])
+		}, params)
 		return
 
 	var map_rid: RID = world.get_navigation_map()
@@ -688,9 +761,9 @@ func _handle_nav_query(params: Dictionary) -> void:
 	if params.has("from_node"):
 		var from_node := _find_node_recursive(get_tree().root, str(params["from_node"]))
 		if from_node == null or not (from_node is Node3D):
-			EngineDebugger.send_message("godotiq:nav_result", [JSON.stringify({
+			_send_json_result("godotiq:nav_result", {
 				"error": "from_node '%s' not found or not Node3D" % str(params["from_node"]),
-			})])
+			}, params)
 			return
 		from_pos = (from_node as Node3D).global_position
 	elif params.has("from_position"):
@@ -702,9 +775,9 @@ func _handle_nav_query(params: Dictionary) -> void:
 	if params.has("to_node"):
 		var to_node := _find_node_recursive(get_tree().root, str(params["to_node"]))
 		if to_node == null or not (to_node is Node3D):
-			EngineDebugger.send_message("godotiq:nav_result", [JSON.stringify({
+			_send_json_result("godotiq:nav_result", {
 				"error": "to_node '%s' not found or not Node3D" % str(params["to_node"]),
-			})])
+			}, params)
 			return
 		to_pos = (to_node as Node3D).global_position
 	elif params.has("to_position"):
@@ -755,7 +828,7 @@ func _handle_nav_query(params: Dictionary) -> void:
 		if path_points.size() == 0 or path_points[path_points.size() - 1] != last_arr:
 			path_points.append(last_arr)
 
-	EngineDebugger.send_message("godotiq:nav_result", [JSON.stringify({
+	_send_json_result("godotiq:nav_result", {
 		"reachable": path.size() > 1,
 		"distance": snapped(total_distance, 0.01),
 		"direct_distance": snapped(direct_distance, 0.01),
@@ -766,7 +839,7 @@ func _handle_nav_query(params: Dictionary) -> void:
 		"to_on_navmesh": to_on_nav,
 		"from_position": [snapped(from_pos.x, 0.01), snapped(from_pos.y, 0.01), snapped(from_pos.z, 0.01)],
 		"to_position": [snapped(to_pos.x, 0.01), snapped(to_pos.y, 0.01), snapped(to_pos.z, 0.01)],
-	})])
+	}, params)
 
 
 # --- Watch system ---
@@ -813,41 +886,41 @@ func _handle_watch(params: Dictionary) -> void:
 				}
 
 			_watch_active = true
-			EngineDebugger.send_message("godotiq:watch_result", [JSON.stringify({
+			_send_json_result("godotiq:watch_result", {
 				"action": "start",
 				"watches_active": _watches.size(),
 				"sample_interval_ms": int(_watch_sample_interval * 1000),
-			})])
+			}, params)
 
 		"stop":
 			_watches.clear()
 			_watch_active = false
-			EngineDebugger.send_message("godotiq:watch_result", [JSON.stringify({
+			_send_json_result("godotiq:watch_result", {
 				"action": "stop",
 				"watches_active": 0,
-			})])
+			}, params)
 
 		"read":
 			var events_copy: Array = _watch_events.duplicate()
-			EngineDebugger.send_message("godotiq:watch_result", [JSON.stringify({
+			_send_json_result("godotiq:watch_result", {
 				"action": "read",
 				"events": events_copy,
 				"events_total": events_copy.size(),
 				"watches_active": _watches.size(),
-			})])
+			}, params)
 
 		"clear":
 			_watch_events.clear()
-			EngineDebugger.send_message("godotiq:watch_result", [JSON.stringify({
+			_send_json_result("godotiq:watch_result", {
 				"action": "clear",
 				"events_cleared": true,
 				"watches_active": _watches.size(),
-			})])
+			}, params)
 
 		_:
-			EngineDebugger.send_message("godotiq:watch_result", [JSON.stringify({
+			_send_json_result("godotiq:watch_result", {
 				"error": "Unknown action: %s. Use start/stop/read/clear." % action,
-			})])
+			}, params)
 
 
 func _sample_watched_nodes() -> void:
@@ -943,9 +1016,9 @@ func _handle_ui_map(params: Dictionary) -> void:
 			root_node = _find_node_recursive(get_tree().root, root_name)
 
 	if root_node == null:
-		EngineDebugger.send_message("godotiq:ui_map_result", [JSON.stringify({
+		_send_json_result("godotiq:ui_map_result", {
 			"error": "Root node '%s' not found" % root_name,
-		})])
+		}, params)
 		return
 
 	var layout: Array = []
@@ -955,20 +1028,16 @@ func _handle_ui_map(params: Dictionary) -> void:
 	var touch_too_small: Array = []
 	var total_controls: int = _count_ui_controls(layout)
 
-	_collect_ui_stats(layout, interactive_count, touch_too_small)
-	# Re-count since GDScript doesn't pass ints by reference
-	interactive_count = 0
-	touch_too_small = []
 	_collect_ui_stats_flat(layout, touch_too_small)
 	interactive_count = _count_interactive(layout)
 
-	EngineDebugger.send_message("godotiq:ui_map_result", [JSON.stringify({
+	_send_json_result("godotiq:ui_map_result", {
 		"root": str(root_node.name),
 		"total_controls": total_controls,
 		"interactive_elements": interactive_count,
 		"touch_targets_too_small": touch_too_small,
 		"layout": layout,
-	})])
+	}, params)
 
 
 func _walk_ui_tree(node: Node, result: Array, depth: int, max_depth: int, include_invisible: bool, detail: String) -> void:
@@ -1095,20 +1164,16 @@ func _collect_ui_stats_flat(items: Array, touch_too_small: Array) -> void:
 				_collect_ui_stats_flat(item["children"], touch_too_small)
 
 
-func _collect_ui_stats(_items: Array, _interactive_count: int, _touch_too_small: Array) -> void:
-	pass
-
-
 # --- Explore camera ---
 
 func _handle_explore_camera(params: Dictionary) -> void:
 	var action: String = params.get("action", "")
 	var scene_root := get_tree().root
 	if scene_root == null:
-		EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+		_send_json_result("godotiq:explore_camera_result", {
 			"error": "No scene tree root available",
 			"code": "NO_SCENE_ROOT",
-		})])
+		}, params)
 		return
 
 	match action:
@@ -1133,18 +1198,18 @@ func _handle_explore_camera(params: Dictionary) -> void:
 			scene_root.add_child(drone)
 			drone.make_current()
 
-			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+			_send_json_result("godotiq:explore_camera_result", {
 				"status": "created",
 				"original_camera": original_cam_path,
-			})])
+			}, params)
 
 		"move":
 			var drone = scene_root.get_node_or_null("GodotIQ_DroneCam")
 			if drone == null:
-				EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+				_send_json_result("godotiq:explore_camera_result", {
 					"error": "GodotIQ_DroneCam not found",
 					"code": "DRONE_NOT_FOUND",
-				})])
+				}, params)
 				return
 
 			var pos: Array = params.get("position", [0, 0, 0])
@@ -1167,18 +1232,18 @@ func _handle_explore_camera(params: Dictionary) -> void:
 			if params.has("fov"):
 				drone.fov = float(params["fov"])
 
-			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+			_send_json_result("godotiq:explore_camera_result", {
 				"status": "moved",
 				"position": [drone.global_position.x, drone.global_position.y, drone.global_position.z],
 				"rotation": [drone.rotation_degrees.x, drone.rotation_degrees.y, drone.rotation_degrees.z],
-			})])
+			}, params)
 
 		"destroy":
 			var drone = scene_root.get_node_or_null("GodotIQ_DroneCam")
 			if drone == null:
-				EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+				_send_json_result("godotiq:explore_camera_result", {
 					"status": "destroyed",
-				})])
+				}, params)
 				return
 
 			var original_path: String = drone.get_meta("original_camera_path", "")
@@ -1189,12 +1254,12 @@ func _handle_explore_camera(params: Dictionary) -> void:
 
 			drone.queue_free()
 
-			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+			_send_json_result("godotiq:explore_camera_result", {
 				"status": "destroyed",
-			})])
+			}, params)
 
 		_:
-			EngineDebugger.send_message("godotiq:explore_camera_result", [JSON.stringify({
+			_send_json_result("godotiq:explore_camera_result", {
 				"error": "Unknown action: %s" % action,
 				"code": "UNKNOWN_ACTION",
-			})])
+			}, params)
