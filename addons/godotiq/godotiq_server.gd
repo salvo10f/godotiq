@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.3.5"
+const ADDON_VERSION := "0.3.6"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -748,7 +748,7 @@ func _handle_node_ops(peer_id: int, id: String, params: Dictionary) -> void:
 		return
 
 	var action_name := "GodotIQ: %d node operation(s)" % operations.size()
-	undo_redo.create_action(action_name)
+	undo_redo.create_action(action_name, EditorUndoRedoManager.MERGE_DISABLE, scene_root)
 
 	var results: Array = []
 	var any_succeeded := false
@@ -764,6 +764,34 @@ func _handle_node_ops(peer_id: int, id: String, params: Dictionary) -> void:
 
 	if any_succeeded:
 		undo_redo.commit_action()
+
+		# Verification read-back and property change notifications
+		var modified_nodes: Dictionary = {}
+		for result in results:
+			if result["status"] != "ok":
+				continue
+			var node_ref = result.get("_node_ref")
+			if node_ref != null and is_instance_valid(node_ref):
+				modified_nodes[node_ref] = true
+				# Read back the property to verify it was actually set
+				var prop_name: String = result.get("_prop_name", "")
+				var expected = result.get("_expected")
+				if prop_name != "" and expected != null:
+					var actual = node_ref.get(prop_name)
+					if actual is Vector3:
+						result["verified"] = (actual as Vector3).is_equal_approx(expected as Vector3)
+						result["actual_value"] = [actual.x, actual.y, actual.z]
+					elif actual is Vector2:
+						result["verified"] = (actual as Vector2).is_equal_approx(expected as Vector2)
+						result["actual_value"] = [actual.x, actual.y]
+					else:
+						result["verified"] = actual == expected
+
+		# Batch notify property changes on all modified nodes
+		for node in modified_nodes:
+			if is_instance_valid(node):
+				node.notify_property_list_changed()
+
 		_godotiq_action_history.append({
 			"action": action_name,
 			"operations": results.size(),
@@ -773,6 +801,12 @@ func _handle_node_ops(peer_id: int, id: String, params: Dictionary) -> void:
 			_godotiq_action_history = _godotiq_action_history.slice(
 				_godotiq_action_history.size() - MAX_HISTORY_SIZE
 			)
+
+	# Clean up internal metadata from ALL results before sending response
+	for result in results:
+		result.erase("_node_ref")
+		result.erase("_prop_name")
+		result.erase("_expected")
 
 	send_response(peer_id, id, {
 		"results": results,
@@ -827,27 +861,28 @@ func _op_move(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var pos: Array = op_data.get("position", [0, 0, 0])
 	if not (pos is Array) or pos.size() < 2:
 		return {"op": "move", "node": node_name, "status": "error", "error": "position must be an array of at least 2 numbers"}
+	var new_pos_value  # Variant: Vector3 or Vector2
 	if node is Node3D:
 		if pos.size() < 3:
 			return {"op": "move", "node": node_name, "status": "error", "error": "Node3D position requires [x, y, z]"}
 		var old_pos := (node as Node3D).position
-		var new_pos := Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
-		ur.add_do_property(node, "position", new_pos)
+		new_pos_value = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+		ur.add_do_property(node, "position", new_pos_value)
 		ur.add_undo_property(node, "position", old_pos)
 	elif node is Node2D:
 		var old_pos := (node as Node2D).position
-		var new_pos := Vector2(float(pos[0]), float(pos[1]))
-		ur.add_do_property(node, "position", new_pos)
+		new_pos_value = Vector2(float(pos[0]), float(pos[1]))
+		ur.add_do_property(node, "position", new_pos_value)
 		ur.add_undo_property(node, "position", old_pos)
 	elif node is Control:
 		var old_pos := (node as Control).position
-		var new_pos := Vector2(float(pos[0]), float(pos[1]))
-		ur.add_do_property(node, "position", new_pos)
+		new_pos_value = Vector2(float(pos[0]), float(pos[1]))
+		ur.add_do_property(node, "position", new_pos_value)
 		ur.add_undo_property(node, "position", old_pos)
 	else:
 		return {"op": "move", "node": node_name, "status": "error", "error": "Node does not support position"}
 
-	return {"op": "move", "node": node_name, "status": "ok"}
+	return {"op": "move", "node": node_name, "status": "ok", "_node_ref": node, "_prop_name": "position", "_expected": new_pos_value}
 
 
 func _op_rotate(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
@@ -867,7 +902,7 @@ func _op_rotate(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var new_rot := Vector3(float(rot[0]), float(rot[1]), float(rot[2]))
 	ur.add_do_property(node, "rotation_degrees", new_rot)
 	ur.add_undo_property(node, "rotation_degrees", old_rot)
-	return {"op": "rotate", "node": node_name, "status": "ok"}
+	return {"op": "rotate", "node": node_name, "status": "ok", "_node_ref": node, "_prop_name": "rotation_degrees", "_expected": new_rot}
 
 
 func _op_scale(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
@@ -887,7 +922,7 @@ func _op_scale(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var new_scale := Vector3(float(sc[0]), float(sc[1]), float(sc[2]))
 	ur.add_do_property(node, "scale", new_scale)
 	ur.add_undo_property(node, "scale", old_scale)
-	return {"op": "scale", "node": node_name, "status": "ok"}
+	return {"op": "scale", "node": node_name, "status": "ok", "_node_ref": node, "_prop_name": "scale", "_expected": new_scale}
 
 
 func _op_set_property(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
@@ -939,7 +974,7 @@ func _op_set_property(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 
 	ur.add_do_property(node, base_property, value)
 	ur.add_undo_property(node, base_property, old_value)
-	return {"op": "set_property", "node": node_name, "status": "ok", "property": property}
+	return {"op": "set_property", "node": node_name, "status": "ok", "property": property, "_node_ref": node, "_prop_name": base_property, "_expected": value}
 
 
 func _op_add_child(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
