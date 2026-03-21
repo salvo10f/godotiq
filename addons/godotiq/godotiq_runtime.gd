@@ -374,6 +374,34 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 		Input.parse_input_event(event)
 		return {"type": "mouse_motion", "relative_x": rel_x, "relative_y": rel_y, "ok": true}
 
+	if cmd.has("click_at"):
+		var pos_data = cmd["click_at"]
+		if not (pos_data is Array) or pos_data.size() < 2:
+			return {"type": "click_at", "ok": false, "error": "click_at requires [x, y] array"}
+		var screen_pos := Vector2(float(pos_data[0]), float(pos_data[1]))
+		var btn_idx := _resolve_mouse_button(cmd.get("button", "left"))
+		if btn_idx < 0:
+			return {"type": "click_at", "ok": false, "error": "Unknown button: %s" % cmd.get("button")}
+		await _dispatch_click(screen_pos, btn_idx, -2)
+		return {"type": "click_at", "position": [screen_pos.x, screen_pos.y], "button": cmd.get("button", "left"), "ok": true}
+
+	if cmd.has("click_at_world"):
+		var world_data = cmd["click_at_world"]
+		if not (world_data is Array) or world_data.size() < 3:
+			return {"type": "click_at_world", "ok": false, "error": "click_at_world requires [x, y, z] array"}
+		var world_pos := Vector3(float(world_data[0]), float(world_data[1]), float(world_data[2]))
+		var camera := get_viewport().get_camera_3d()
+		if camera == null:
+			return {"type": "click_at_world", "ok": false, "error": "No active Camera3D found"}
+		if camera.is_position_behind(world_pos):
+			return {"type": "click_at_world", "ok": false, "error": "World position is behind the camera"}
+		var screen_pos := camera.unproject_position(world_pos)
+		var btn_idx := _resolve_mouse_button(cmd.get("button", "left"))
+		if btn_idx < 0:
+			return {"type": "click_at_world", "ok": false, "error": "Unknown button: %s" % cmd.get("button")}
+		await _dispatch_click(screen_pos, btn_idx, -2)
+		return {"type": "click_at_world", "world_position": [world_pos.x, world_pos.y, world_pos.z], "screen_position": [screen_pos.x, screen_pos.y], "button": cmd.get("button", "left"), "ok": true}
+
 	if cmd.has("tap"):
 		var target_name: String = cmd["tap"]
 		var target_node := _find_ui_node(target_name)
@@ -382,26 +410,40 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 
 		var rect: Rect2 = target_node.get_global_rect()
 		var center := rect.get_center()
-
-		var press := InputEventMouseButton.new()
-		press.button_index = MOUSE_BUTTON_LEFT
-		press.pressed = true
-		press.position = center
-		press.global_position = center
-		Input.parse_input_event(press)
-
-		await get_tree().create_timer(0.05).timeout
-
-		var release := InputEventMouseButton.new()
-		release.button_index = MOUSE_BUTTON_LEFT
-		release.pressed = false
-		release.position = center
-		release.global_position = center
-		Input.parse_input_event(release)
-
+		await _dispatch_click(center, MOUSE_BUTTON_LEFT)
 		return {"type": "tap", "target": target_name, "position": [center.x, center.y], "ok": true}
 
 	return {"type": "unknown", "ok": false, "error": "Unrecognized command format"}
+
+
+func _dispatch_click(screen_pos: Vector2, button_index: int, device: int = 0) -> void:
+	var press := InputEventMouseButton.new()
+	press.button_index = button_index
+	press.pressed = true
+	press.position = screen_pos
+	press.global_position = screen_pos
+	if device != 0:
+		press.device = device
+	Input.parse_input_event(press)
+
+	await get_tree().create_timer(0.05).timeout
+
+	var release := InputEventMouseButton.new()
+	release.button_index = button_index
+	release.pressed = false
+	release.position = screen_pos
+	release.global_position = screen_pos
+	if device != 0:
+		release.device = device
+	Input.parse_input_event(release)
+
+
+func _resolve_mouse_button(button_name: String) -> int:
+	match button_name:
+		"left": return MOUSE_BUTTON_LEFT
+		"right": return MOUSE_BUTTON_RIGHT
+		"middle": return MOUSE_BUTTON_MIDDLE
+		_: return -1
 
 
 func _find_ui_node(target_name: String) -> Control:

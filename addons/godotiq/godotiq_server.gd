@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.3.7"
+const ADDON_VERSION := "0.3.8"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -867,7 +867,7 @@ func _op_move(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	if node == null:
 		return {"op": "move", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
 
-	var pos: Array = op_data.get("position", [0, 0, 0])
+	var pos: Array = op_data.get("position", op_data.get("value", [0, 0, 0]))
 	if not (pos is Array) or pos.size() < 2:
 		return {"op": "move", "node": node_name, "status": "error", "error": "position must be an array of at least 2 numbers"}
 	var new_pos_value  # Variant: Vector3 or Vector2
@@ -903,7 +903,7 @@ func _op_rotate(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	if not (node is Node3D):
 		return {"op": "rotate", "node": node_name, "status": "error", "error": "Rotate only supports Node3D"}
 
-	var rot: Array = op_data.get("rotation", [0, 0, 0])
+	var rot: Array = op_data.get("rotation", op_data.get("value", [0, 0, 0]))
 	if not (rot is Array) or rot.size() < 3:
 		return {"op": "rotate", "node": node_name, "status": "error", "error": "rotation requires [x, y, z]"}
 	var n3d: Node3D = node
@@ -923,7 +923,7 @@ func _op_scale(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	if not (node is Node3D):
 		return {"op": "scale", "node": node_name, "status": "error", "error": "Scale only supports Node3D"}
 
-	var sc: Array = op_data.get("scale", [1, 1, 1])
+	var sc: Array = op_data.get("scale", op_data.get("value", [1, 1, 1]))
 	if not (sc is Array) or sc.size() < 3:
 		return {"op": "scale", "node": node_name, "status": "error", "error": "scale requires [x, y, z]"}
 	var n3d: Node3D = node
@@ -1224,17 +1224,62 @@ func _value_to_json(value) -> Variant:
 	return str(value)
 
 
-func _convert_value(value, reference_value):
-	if reference_value is Vector3 and value is Array and value.size() >= 3:
+func _to_vector3(value, fallback: Vector3 = Vector3.ZERO) -> Vector3:
+	if value is Vector3:
+		return value
+	if value is Vector3i:
+		return Vector3(value.x, value.y, value.z)
+	if value is Dictionary:
+		return Vector3(
+			float(value.get("x", fallback.x)),
+			float(value.get("y", fallback.y)),
+			float(value.get("z", fallback.z))
+		)
+	if value is Array and value.size() >= 3:
 		return Vector3(float(value[0]), float(value[1]), float(value[2]))
-	elif reference_value is Vector2 and value is Array and value.size() >= 2:
+	return fallback
+
+
+func _to_vector2(value, fallback: Vector2 = Vector2.ZERO) -> Vector2:
+	if value is Vector2:
+		return value
+	if value is Vector2i:
+		return Vector2(value.x, value.y)
+	if value is Dictionary:
+		return Vector2(
+			float(value.get("x", fallback.x)),
+			float(value.get("y", fallback.y))
+		)
+	if value is Array and value.size() >= 2:
 		return Vector2(float(value[0]), float(value[1]))
+	return fallback
+
+
+func _to_color(value, fallback: Color = Color.WHITE) -> Color:
+	if value is Color:
+		return value
+	if value is String:
+		return Color(value)
+	if value is Dictionary:
+		return Color(
+			float(value.get("r", fallback.r)),
+			float(value.get("g", fallback.g)),
+			float(value.get("b", fallback.b)),
+			float(value.get("a", 1.0))
+		)
+	if value is Array and value.size() >= 3:
+		var a: float = float(value[3]) if value.size() >= 4 else 1.0
+		return Color(float(value[0]), float(value[1]), float(value[2]), a)
+	return fallback
+
+
+func _convert_value(value, reference_value):
+	if reference_value is Vector3:
+		return _to_vector3(value, reference_value)
+	elif reference_value is Vector2:
+		return _to_vector2(value, reference_value)
 	elif reference_value is Color:
-		if value is Array and value.size() >= 3:
-			var a: float = float(value[3]) if value.size() >= 4 else 1.0
-			return Color(float(value[0]), float(value[1]), float(value[2]), a)
-		elif value is String:
-			return Color(value)
+		return _to_color(value, reference_value)
 	elif reference_value is int and (value is int or value is float):
 		return int(value)
 	elif reference_value is float and (value is int or value is float):
