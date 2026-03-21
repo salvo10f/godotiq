@@ -382,7 +382,7 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 		var btn_idx := _resolve_mouse_button(cmd.get("button", "left"))
 		if btn_idx < 0:
 			return {"type": "click_at", "ok": false, "error": "Unknown button: %s" % cmd.get("button")}
-		await _dispatch_click(screen_pos, btn_idx, -2)
+		await _dispatch_click(screen_pos, btn_idx)
 		return {"type": "click_at", "position": [screen_pos.x, screen_pos.y], "button": cmd.get("button", "left"), "ok": true}
 
 	if cmd.has("click_at_world"):
@@ -399,7 +399,7 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 		var btn_idx := _resolve_mouse_button(cmd.get("button", "left"))
 		if btn_idx < 0:
 			return {"type": "click_at_world", "ok": false, "error": "Unknown button: %s" % cmd.get("button")}
-		await _dispatch_click(screen_pos, btn_idx, -2)
+		await _dispatch_click(screen_pos, btn_idx)
 		return {"type": "click_at_world", "world_position": [world_pos.x, world_pos.y, world_pos.z], "screen_position": [screen_pos.x, screen_pos.y], "button": cmd.get("button", "left"), "ok": true}
 
 	if cmd.has("tap"):
@@ -416,14 +416,12 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 	return {"type": "unknown", "ok": false, "error": "Unrecognized command format"}
 
 
-func _dispatch_click(screen_pos: Vector2, button_index: int, device: int = 0) -> void:
+func _dispatch_click(screen_pos: Vector2, button_index: int) -> void:
 	var press := InputEventMouseButton.new()
 	press.button_index = button_index
 	press.pressed = true
 	press.position = screen_pos
 	press.global_position = screen_pos
-	if device != 0:
-		press.device = device
 	Input.parse_input_event(press)
 
 	await get_tree().create_timer(0.05).timeout
@@ -433,8 +431,6 @@ func _dispatch_click(screen_pos: Vector2, button_index: int, device: int = 0) ->
 	release.pressed = false
 	release.position = screen_pos
 	release.global_position = screen_pos
-	if device != 0:
-		release.device = device
 	Input.parse_input_event(release)
 
 
