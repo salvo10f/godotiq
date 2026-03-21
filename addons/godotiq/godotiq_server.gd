@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.3.6"
+const ADDON_VERSION := "0.3.7"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -112,6 +112,15 @@ func _on_update_check_completed(result: int, response_code: int, _headers: Packe
 		print("GodotIQ: Update available — v%s (current: v%s)" % [remote_version, ADDON_VERSION])
 		if status_label:
 			status_label.text = "GodotIQ v%s — Update available: v%s (pip install --upgrade godotiq && godotiq install-addon .)" % [ADDON_VERSION, remote_version]
+		# Show one-time popup dialog
+		var dialog := AcceptDialog.new()
+		dialog.title = "GodotIQ Update Available"
+		dialog.dialog_text = "GodotIQ v%s is available (you have v%s).\n\nRun in terminal:\npip install --upgrade godotiq && godotiq install-addon ." % [remote_version, ADDON_VERSION]
+		dialog.ok_button_text = "Got it"
+		dialog.confirmed.connect(dialog.queue_free)
+		dialog.canceled.connect(dialog.queue_free)
+		add_child(dialog)
+		dialog.popup_centered()
 
 
 func _is_newer_version(remote: String, local: String) -> bool:
@@ -748,7 +757,7 @@ func _handle_node_ops(peer_id: int, id: String, params: Dictionary) -> void:
 		return
 
 	var action_name := "GodotIQ: %d node operation(s)" % operations.size()
-	undo_redo.create_action(action_name, EditorUndoRedoManager.MERGE_DISABLE, scene_root)
+	undo_redo.create_action(action_name, 0, scene_root)  # 0 = MERGE_DISABLE
 
 	var results: Array = []
 	var any_succeeded := false
