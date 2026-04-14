@@ -126,7 +126,7 @@ func _on_update_check_completed(result: int, response_code: int, _headers: Packe
 func _is_newer_version(remote: String, local: String) -> bool:
 	var r := remote.split(".")
 	var l := local.split(".")
-	var max_len := max(r.size(), l.size())
+	var max_len: int = max(r.size(), l.size())
 	for i in range(max_len):
 		var rv: int = int(r[i]) if i < r.size() else 0
 		var lv: int = int(l[i]) if i < l.size() else 0
