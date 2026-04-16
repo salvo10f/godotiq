@@ -1,49 +1,40 @@
 # Changelog
 
-All notable changes to GodotIQ will be documented in this file.
+## [0.5.0] - 2026-04-15
 
-## [0.1.1] - 2026-03-12
+### Security
 
-### Fixed
-- `godotiq_run` no longer blocks on script errors — launches the game and includes warnings in the response
-- `_check_scripts_valid()` uses `script.reload()` instead of `can_instantiate()` to eliminate false positives
-- `godotiq_ping` now returns `"license": "pro"` or `"community"` in the response
-- `plugin.cfg` version corrected from `2.0.0` to `0.1.1`
-- Addon `ADDON_VERSION` constant updated to match package version
-- License logging cleaned up — uses `logger.info()` instead of `print()`, removed verbose org/url from default output
-- Cross-platform license cache path — uses `%APPDATA%` on Windows, `~/.config/godotiq` on macOS/Linux
+- Rotated the leaked dev key; old hash and plaintext scrubbed from the tree (section 01).
+- Signed Ed25519 receipts replace the unsigned `license_cache.json` (sections 07, 08).
+- Worker-only Polar validation via `/api/activate` and `/api/receipt`; client no longer talks to Polar directly (sections 05, 06).
+- Bundle re-verification against pinned SHA-256 + companion manifest on every load; extraction runs in per-process throwaway tempdirs with an `atexit` cleanup (section 09).
+- Env fencing: prod builds ignore `GODOTIQ_POLAR_SANDBOX`, `GODOTIQ_POLAR_ORG_ID`, `GODOTIQ_BUNDLE_URL`, `GODOTIQ_ACTIVATE_URL`, `GODOTIQ_RECEIPT_URL` (section 04).
+- Download-time defense: streaming read with a 50 MB size cap, Content-Length validation, and sha256 matched against the pinned allowlist before any archive is persisted (section 09).
 
-### Added
-- Editor bottom panel showing GodotIQ version, WebSocket connection status, and tool count
-- Status label updates automatically on client connect/disconnect
+### Infrastructure
 
-## [0.1.0] - 2026-03-12
+- Single source of truth for version: `pyproject.toml` → `scripts/sync_version.py` propagates to `plugin.cfg`, `godotiq_server.gd`, `server.json`, and the `tests/test_version.py` fixture (section 11).
+- URL unification: every canonical URL comes from `godotiq.urls`; an AST-enforced test keeps it honest (section 03).
+- First CI (`ci.yml`) and release (`release.yml`) GitHub Actions workflows; PyPI publishing via Trusted Publishing (OIDC). Operator runbooks for signing-key rotation, mirror leak response, and PyPI OIDC fallback (section 13).
+- Public mirror sync automation (`scripts/sync_public_mirror.py`) with allowlist-driven copy, README templating, and a leak-guard that blocks dev keys, Polar URLs, private repo names, and unpinned sha256 digests (section 12).
+- `godotiq_ping` exposes `receipt` / `bundle` / `tool_count` fields so operators can diagnose license and bundle state without reading logs (section 10).
 
-### Initial Release
+### Runtime deps
 
-First public release of GodotIQ — the definitive MCP for AI-assisted Godot development.
+- Added `cryptography >= 42.0` (required by the new receipt verifier in `src/godotiq/receipt.py`).
 
-**35 tools across 9 categories:**
+### Breaking / Downgrade
 
-- **Bridge** (18 tools) — Runtime control: screenshot, scene_tree, run, input, node_ops, script_ops, file_ops, exec, state_inspect, perf_snapshot, save_scene, camera, watch, undo_history, build_scene, check_errors, verify_motion, nav_query
-- **Spatial** (3 tools) — 3D intelligence: scene_map, placement, spatial_audit
-- **Code** (4 tools) — Static analysis: dependency_graph, signal_map, impact_check, validate
-- **Animation** (2 tools) — animation_info, animation_audit
-- **Flow** (1 tool) — trace_flow
-- **Assets** (2 tools) — asset_registry, suggest_scale
-- **Memory** (2 tools) — project_summary, file_context
-- **UI** (1 tool) — ui_map
-- **Navigation** (1 tool) — nav_query
+> 0.5.0 is a one-way upgrade. The unsigned `license_cache.json` is renamed to `license_cache.json.legacy` on first successful activation. Downgrading to 0.4.x requires re-running with `GODOTIQ_LICENSE_KEY` set so 0.4.x repopulates the legacy cache file — the `.legacy` suffix is not read by 0.4.x.
 
-**Key features:**
+## 0.4.1
 
-- Three-layer parser architecture (raw parser, scene resolver, project index)
-- WebSocket bridge to Godot editor via lightweight GDScript addon
-- Token optimization with 3 detail levels (brief/normal/full)
-- Smart object placement with Marker3D detection and constraint solving
-- Signal flow tracing across multiple files
-- Convention validation with auto-fix suggestions
-- PRO tier with Polar.sh license validation
-- Cross-platform support (macOS, Linux, Windows)
-- CLI with `install-addon` subcommand
-- 1100+ automated tests
+- Fix: addon version sync — `plugin.cfg` and `ADDON_VERSION` now stay in sync with PyPI release
+- Fix: `godotiq_ping` reports `pro_bundle` status alongside license tier; warns when license is Pro but bundle is not active
+
+## 0.4.0
+
+- Pro bundle distribution via Cloudflare Worker + R2
+- 22 Community + 14 Pro dual-tier tool model
+- Polar.sh license validation with disk cache and offline fallback
+- Pro tool stubs with rich community previews
