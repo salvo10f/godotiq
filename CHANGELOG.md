@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.2] - 2026-04-30
+
+### Fixed
+
+- `godotiq auth status` now invokes `ensure_pro_bundle()` before reading `pro_status()`. Under 0.5.0/0.5.1 the standalone CLI never booted the Pro bundle (only the MCP server did, in `server.py:_lifespan`), so `auth status` reported `bundle: community` / `reason: bundle_unavailable` for every paying user even when the bundle would have loaded fine inside the running MCP server. The `godotiq_ping` MCP tool was unaffected (the server-side bundle warmup ran before `license_diagnostic()` was called there). Operators using `auth status` to diagnose Pro entitlement now see the same bundle state the server would load. The exception path is defensively swallowed so the diagnostic always emits.
+
+### Added
+
+- `bundle_error_detail` field surfaced via `pro_loader.bundle_error_detail()` and included in `license_diagnostic()` (and therefore `godotiq auth status --json` and `godotiq_ping`). Carries a stable enum-keyed leaf for the precise reason a bundle load attempt failed: `download_http_<code>` (e.g. `download_http_401` for an expired/rejected receipt, `download_http_404` for no compatible bundle, `download_http_429` for rate-limit), `download_network` (connect/timeout), `hash_mismatch` (release misalignment between PyPI wheel and R2 bundle, or a hostile/corrupted response), `receipt_missing`, `content_length_invalid`, `content_length_mismatch`, `bundle_too_large`, `persist_failed`, `extract_failed`, `cached_bundle_unverified`, `download_unexpected`. Field is omitted from the diagnostic dict when the loader has not run or completed successfully — operators no longer need log access to distinguish a worker-side rejection from a release misalignment when triaging support tickets.
+
+### Tests
+
+- Test isolation hardening: 6 stub-test files (`test_stub_assets.py`, `test_stub_flow.py`, `test_stub_memory.py`, `test_stub_code.py`, `test_stub_spatial.py`, `test_stub_animation.py`) plus `test_stub_bridge_explore.py`, `test_community_tier.py`, `test_server.py::TestPingTool`, and `test_scaffolding_int.py::TestMcpServerPingToolRegistered` now declare `tmp_user_data_dir` and reset license/loader state in their fixtures. CI was unaffected by the prior gap (no residual receipt) but on developer machines a stale `within_grace` receipt under the real platformdirs `user_data` dir was flipping `is_pro()` to True and routing 73 community-mode assertions through the `license_error` branch — a flake source whose root cause was test-environment, not product, behavior.
+
 ## [0.5.1] - 2026-04-18
 
 ### Security
