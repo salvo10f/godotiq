@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.5.3] - 2026-05-03
+
+### Fixed
+
+- License activation diagnostics now distinguish `network_unreachable`, `worker_5xx`, `invalid_license`, `signature_mismatch`, and `unexpected_response` instead of collapsing unrelated failures into `migration_required`. Existing `limit_reached` and `key_revoked` outcomes remain explicit.
+- Receipt refresh now recovers automatically when the Worker returns `410` with no active seats by falling back to a fresh activation for the existing install ID.
+- `godotiq auth status` human output no longer shows maintainer-only `dev_key: not set` noise, and only prints bundle error details when a real bundle error exists.
+
+### Added
+
+- New `godotiq auth reset --yes` command clears local license state without touching the Pro bundle cache, giving paying users a safe self-service recovery path.
+- `godotiq auth status --json` now includes `godotiq_version` and `python_version` so support can diagnose customer environments without an extra round trip.
+
+### Documentation
+
+- Setup docs now call out the `uvx` environment boundary explicitly: Pro users must put `GODOTIQ_LICENSE_KEY` in the MCP server `env` block because shell exports may not reach the MCP-launched `uvx` process.
+- MCP examples now use unmistakable placeholders such as `<REPLACE_WITH_YOUR_GODOT_PROJECT_PATH>` and explain how to omit the license key for Community tier.
+
+### Agent Guidance
+
+- Screenshot usage has been demoted to an expensive visual-only fallback. Prompt guidance now steers agents toward structured text tools first and requires verification evidence appropriate to the change instead of defaulting to screenshots.
+
+### Tests
+
+- Added regression coverage for license failure classification, activation fallback, `auth reset`, prompt screenshot demotion, and receipt status documentation sync.
+
 ## [0.5.2] - 2026-04-30
 
 ### Fixed
