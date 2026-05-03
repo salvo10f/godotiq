@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.5.3"
+const ADDON_VERSION := "0.5.4"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -400,6 +400,8 @@ func _dispatch(peer_id: int, id: String, method: String, params: Dictionary) -> 
 			_handle_build_scene(peer_id, id, params)
 		"check_errors":
 			_handle_check_errors(peer_id, id, params)
+		"read_debug_console":
+			_handle_read_debug_console(peer_id, id, params)
 		"set_main_scene":
 			_handle_set_main_scene(peer_id, id, params)
 		"reload_script":
@@ -2204,6 +2206,87 @@ func _record_error(msg: String) -> void:
 	_recent_errors.append(msg)
 	if _recent_errors.size() > MAX_RECENT_ERRORS:
 		_recent_errors = _recent_errors.slice(-MAX_RECENT_ERRORS)
+
+
+func _clear_recent_errors() -> void:
+	_recent_errors.clear()
+
+
+func _format_runtime_error(raw, index: int) -> Dictionary:
+	var message := str(raw)
+	var parsed = JSON.parse_string(message)
+	if parsed is Dictionary:
+		var out: Dictionary = parsed.duplicate(true)
+		out["source"] = str(out.get("source", "runtime"))
+		out["severity"] = str(out.get("severity", "error"))
+		if not out.has("message"):
+			out["message"] = str(out.get("error", message))
+		out["index"] = index
+		return out
+	return {
+		"source": "runtime",
+		"severity": "error",
+		"message": message,
+		"index": index,
+	}
+
+
+func _format_script_error(entry: Dictionary) -> Dictionary:
+	return {
+		"source": "script",
+		"severity": "error",
+		"file": str(entry.get("file", "")),
+		"line": int(entry.get("line", 0)),
+		"message": str(entry.get("message", entry.get("error", ""))),
+		"timestamp": entry.get("timestamp", 0),
+	}
+
+
+func _handle_read_debug_console(peer_id: int, id: String, params: Dictionary) -> void:
+	var limit: int = clampi(int(params.get("limit", 20)), 1, 100)
+	var clear_after_read: bool = bool(params.get("clear", false))
+	var include_runtime: bool = bool(params.get("include_runtime", true))
+	var include_script: bool = bool(params.get("include_script", true))
+	var entries: Array = []
+	var runtime_total := _recent_errors.size()
+	var script_entries := _get_script_errors()
+	var script_total := script_entries.size()
+	var included_total := 0
+
+	if include_runtime:
+		included_total += runtime_total
+		var start_idx: int = max(0, runtime_total - limit)
+		for i in range(start_idx, runtime_total):
+			entries.append(_format_runtime_error(_recent_errors[i], i))
+
+	if include_script:
+		included_total += script_total
+		var script_start_idx: int = max(0, script_total - limit)
+		for i in range(script_start_idx, script_total):
+			entries.append(_format_script_error(script_entries[i]))
+
+	if entries.size() > limit:
+		entries = entries.slice(entries.size() - limit, entries.size())
+
+	if clear_after_read:
+		if include_runtime:
+			_clear_recent_errors()
+		if include_script:
+			_clear_script_errors()
+
+	send_response(peer_id, id, {
+		"entries": entries,
+		"total": entries.size(),
+		"runtime_errors_total": runtime_total,
+		"script_errors_total": script_total,
+		"truncated": included_total > entries.size(),
+		"cleared": clear_after_read,
+		"capture": {
+			"runtime_errors": true,
+			"script_errors": _has_logger,
+			"script_errors_note": "" if _has_logger else "Script logger requires Godot 4.5+; use godotiq_check_errors for explicit script checks.",
+		},
+	})
 
 
 func _get_editor_state() -> Dictionary:

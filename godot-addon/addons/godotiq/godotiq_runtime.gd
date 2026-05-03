@@ -12,6 +12,9 @@ var _watch_events: Array = []
 var _watch_sample_timer: float = 0.0
 var _watch_sample_interval: float = 0.5
 var _watch_active: bool = false
+var _runtime_logger  # Variant — null if Logger unavailable
+var _runtime_log_queue: Array = []
+var _runtime_log_mutex: Mutex = Mutex.new()
 
 
 func _ready() -> void:
@@ -21,10 +24,41 @@ func _ready() -> void:
 		queue_free()
 		return
 	EngineDebugger.register_message_capture("godotiq", _on_debugger_message)
+	_install_runtime_logger()
 	print("[GodotIQ] Message capture registered")
 
 
+func _install_runtime_logger() -> void:
+	if not ClassDB.class_exists("Logger") or not OS.has_method("add_logger"):
+		return
+	var logger_script = load("res://addons/godotiq/godotiq_runtime_logger.gd")
+	if logger_script == null:
+		return
+	_runtime_logger = logger_script.new(Callable(self, "_queue_runtime_log_error"))
+	OS.call("add_logger", _runtime_logger)
+
+
+func _queue_runtime_log_error(entry: Dictionary) -> void:
+	_runtime_log_mutex.lock()
+	_runtime_log_queue.append(entry)
+	if _runtime_log_queue.size() > 100:
+		_runtime_log_queue = _runtime_log_queue.slice(-100)
+	_runtime_log_mutex.unlock()
+
+
+func _flush_runtime_log_errors() -> void:
+	if not EngineDebugger.is_active():
+		return
+	_runtime_log_mutex.lock()
+	var pending := _runtime_log_queue.duplicate(true)
+	_runtime_log_queue.clear()
+	_runtime_log_mutex.unlock()
+	for entry in pending:
+		EngineDebugger.send_message("godotiq:error", [JSON.stringify(entry)])
+
+
 func _process(delta: float) -> void:
+	_flush_runtime_log_errors()
 	if not _watch_active or _watches.is_empty():
 		return
 	_watch_sample_timer += delta

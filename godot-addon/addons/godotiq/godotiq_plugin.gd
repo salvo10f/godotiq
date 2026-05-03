@@ -73,7 +73,7 @@ func _create_bottom_panel() -> Control:
 
 	var tools_label := Label.new()
 	tools_label.name = "ToolsLabel"
-	tools_label.text = "Tools: 36 registered"
+	tools_label.text = "Tools: 38 registered"
 	vbox.add_child(tools_label)
 
 	return vbox

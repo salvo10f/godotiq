@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.4] - 2026-05-03
+
+### Added
+
+- New `godotiq_read_debug_console` Community tool reads recent Godot Debugger/console errors as structured text, including runtime errors captured from the running game and script errors captured by the editor logger when available.
+- New `godotiq_verify_project_runs` Community tool performs conservative Play-mode verification and returns `PASS`, `FAIL`, or `INCONCLUSIVE` after script preflight, launch, settle, and debug-console inspection.
+
+### Changed
+
+- Agent guidance now treats screenshots as expensive visual-only evidence. Prompts steer agents toward `state_inspect`, `read_debug_console`, `check_errors`, `verify_motion`, and `verify_project_runs` before screenshot/explore calls.
+- Tool count updated to 38 total: 24 Community + 14 Pro.
+
+### Documentation
+
+- Added site update notes for the feedback-loop release, including changelog bullets, tool-count copy, positioning guidance, and post-release checks.
+- Updated website content spec and public-facing README copy for the two new Community tools.
+
+### Tests
+
+- Added coverage for debug-console wrapper registration, Play verification verdicts, launch `success=false` handling, addon debug-console formatting, prompt guidance, tool counts, and mirror/version metadata.
+
 ## [0.5.3] - 2026-05-03
 
 ### Fixed
