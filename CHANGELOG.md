@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.5] - 2026-05-18
+
+### Fixed
+
+- `godotiq auth reset --yes` now preserves the local `install_id` by default so support retries reuse the same Polar activation seat. Use `--new-install-id` only when intentionally rotating the device identity.
+- Fresh activation failures now distinguish an unknown signing `kid` from a true `signature_mismatch`, making Worker key-rotation mistakes visible in `auth status --json`.
+- Deterministic activation failures are cached for the current process so `auth status` does not call `/api/activate` twice and create duplicate seats when a receipt cannot be persisted.
+- Worker `/api/activate` now reuses an existing Polar activation whose label matches the incoming `install_id` instead of creating another activation for the same machine.
+
+### Added
+
+- `auth status --json` includes a redacted `license_key_fingerprint` when `GODOTIQ_LICENSE_KEY` is configured, giving support enough information to spot stale or wrong MCP environment values without exposing the full key.
+
 ## [0.5.4] - 2026-05-03
 
 ### Added
