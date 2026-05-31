@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.6] - 2026-05-30
+
+### Fixed
+
+- **Pro `godotiq_placement` no longer crashes with `'WorldNode' object has no attribute 'name'`.** The bundle's placement wrapper read non-existent `WorldNode` attributes (`name`/`type`/`world_pos`/`groups`/`path`); it now reads the real contract (`node.name`/`node.type`/`world_position`/`node.groups`/`full_path`). The tool failed on every resolved scene since the Pro internals were extracted into the bundle.
+- **Pro `godotiq_suggest_scale` no longer fails with `cannot import name '_find_focus_node'`.** The bundle imported the helper from the gutted public stub module; it now imports it from the Pro package. The tool failed on every call.
+- Hardened two latent imports of the same shape (`_read_main_scene` in the Pro `explore` and placement-resolution paths) to import from the Pro package rather than the public stub, preventing an identical future breakage. No behavior change (the implementations are identical).
+- **Pro `godotiq_placement` no longer suggests occupied Marker3D slots as empty.** The placement wrapper dropped `children_count` when flattening world nodes, so `compute_placement` (which skips markers with `children_count > 0`) treated every marker as empty (default `-1`). The wrapper now passes `children_count`, so designer slots that already contain an object are correctly excluded.
+
+### Tests
+
+- Added a real-implementation integration suite for the Pro spatial tools (no mocks) plus static guards that reject gutted-stub imports and bogus `WorldNode` attribute access, so these regressions are caught before a bundle is built.
+- Added a public `WorldNode`/`TscnNode` attribute contract test (cross-boundary lock for the Pro bundle).
+- Parametrized `tests/test_pro_bundle_real.py` off the hardcoded `0.4.0` bundle and made it fail (not skip) in CI when the delivered bundle is missing.
+- Release pipeline now runs two gates: Pro-source tests before building the bundle, and a real-bundle verification after the sha256 pin and before the wheel build.
+
 ## [0.5.5] - 2026-05-18
 
 ### Fixed
