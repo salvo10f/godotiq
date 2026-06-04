@@ -4,7 +4,8 @@
       "command": "uvx",
       "args": ["godotiq"],
       "env": {
-        "GODOTIQ_PROJECT_ROOT": "/path/to/your/godot/project"
+        "GODOTIQ_PROJECT_ROOT": "<REPLACE_WITH_YOUR_GODOT_PROJECT_PATH>",
+        "GODOTIQ_LICENSE_KEY": "<YOUR_POLAR_LICENSE_KEY_OR_OMIT_FOR_FREE_TIER>"
       }
     }
   }

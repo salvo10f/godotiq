@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.7] - 2026-06-04
+
+### Fixed
+
+- **`godotiq install-addon` no longer crashes on Windows with a `UnicodeDecodeError`.** The CLI read and wrote text files — the bundled `GODOTIQ_RULES.md` rules source and the per-assistant convention files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`) — using the platform default encoding. On Windows that is the ANSI code page (cp1252), which cannot decode the UTF-8 rules file (it aborts on byte `0x9d`), so the addon install crashed before copying anything. Every text read/write in `cli.py` now passes `encoding="utf-8"` explicitly. Reported by a Windows user on Reddit.
+- Hardened the rest of the shipped text I/O against the same locale-default failure mode: the `.godotiq.json` loader (`config.py`) and the release-artifact writer (`scripts/build_bundle.py`) now read/write as UTF-8 explicitly.
+
+### Docs
+
+- **Windows-safe MCP setup.** The README setup snippets used Unix-only shell idioms (`export VAR=…`, `VAR=value uvx …`). Added PowerShell equivalents and made explicit that the `.mcp.json` config is cross-platform: `command` is always `uvx` with the key in the JSON `env` block, so Windows users never need the Unix-only `env` command shim (which has no `cmd`/PowerShell equivalent). Reported alongside the install crash.
+
+### Tests
+
+- Added regression tests pinning UTF-8 file I/O in the addon installer (`test_cli.py`) and the config loader (`test_config.py`), plus a scaffolding guard (`test_scaffolding_int.py`) that fails if the MCP launch examples ever reintroduce a non-Windows-safe `env`-command shim.
+
 ## [0.5.6] - 2026-05-30
 
 ### Fixed
