@@ -11,7 +11,31 @@ Intelligent MCP server for Godot 4. Spatial intelligence, code analysis, and **3
 pip install godotiq==0.5.7
 ```
 
-Or clone and install the Godot addon directly from `godot-addon/addons/godotiq/`.
+For AI clients, no manual install is required. Use `uvx` in your MCP config so the client auto-installs GodotIQ on first use:
+
+```json
+{
+  "mcpServers": {
+    "godotiq": {
+      "command": "uvx",
+      "args": ["godotiq"],
+      "env": {
+        "GODOTIQ_PROJECT_ROOT": "/path/to/your/godot/project"
+      }
+    }
+  }
+}
+```
+
+For Pro, add `"GODOTIQ_LICENSE_KEY": "YOUR_POLAR_LICENSE_KEY"` to the same `env` block. Do not wrap `uvx` with the Unix-only `env` command; this config works on Windows, macOS, and Linux.
+
+Install the Godot addon into a project:
+
+```bash
+uvx godotiq install-addon /path/to/your/godot/project
+```
+
+If you installed GodotIQ with `pip`, `godotiq install-addon /path/to/your/godot/project` works too. Or clone and install the Godot addon directly from `godot-addon/addons/godotiq/`.
 
 ## Pro tier
 
