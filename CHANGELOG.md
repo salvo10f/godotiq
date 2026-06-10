@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.8] - 2026-06-10
+
+Hardening release driven by a verified dogfooding bug registry (8 bugs + 4 audit findings, each independently confirmed or refuted against source before fixing). The common theme: GodotIQ no longer silently misreports runtime or resource state — when something is not running, not attached, stale, or unknown, tools now say so explicitly instead of guessing.
+
+### Fixed
+
+- **`run` no longer reports bare success for a game the runtime tools can't reach.** The addon previously answered `success: true` as soon as the scene was playing, even when the GodotIQ runtime handshake never completed — so follow-up tools (`screenshot`, `input`, `state_inspect`, `exec` in game context) failed with misleading `GAME_NOT_RUNNING`/timeouts. `run` now waits for the runtime to attach and always reports a `runtime_attached` field (with a warning when false), and game-side tools answer an immediate, explicit `RUNTIME_NOT_ATTACHED` instead of hanging to a timeout. Verified end-to-end on a real editor: the not-attached rejection now returns in ~10ms instead of a 5s timeout.
+- **`verify_project_runs` works again and is honest about launch state.** A wrapper bug (`session.root` → `AttributeError`) made the tool error out on every call; fixed. A launch that succeeds without runtime attach is now reported INCONCLUSIVE (never a false PASS), and the game is stopped on that path too (`stop_after` is honored on every early exit).
+- **Signal analysis sees `emit_signal("name")` emissions.** The emission scanner only matched `.emit()`; signals emitted exclusively via `emit_signal(...)` (including `&"name"` StringName form, on any receiver) were invisible and could be flagged unused. The scanner is also now string-masked, multi-match, and multiline-aware: quoted mentions inside string literals no longer record phantom emissions, several emissions on one physical line are all recorded, calls spanning lines are detected, and commas/parens inside string arguments no longer miscount payload args.
+- **Direct-disk scene writes are guarded while the Godot editor is open.** Writing/moving/deleting `.tscn`/`.scn` files behind a running editor's back risks stale-buffer overwrites and UID cache divergence. `file_ops` and `script_ops` now detect an editor on the same project (bridge-first, then a strict process scan) and refuse risky writes with `BLOCKED_EDITOR_OPEN` plus safe alternatives (bridge ops, which remain always allowed). Opt out via `.godotiq.json` `{"editor_guard": {"enabled": false}}`; dry runs are never blocked.
+- **UID diagnostics label their source of truth.** `uid_to_path`/`path_to_uid` results now carry `resolution_source` (`tscn_text`, `disk_import_cache`, or `uid_file`) so a fresh-disk answer is never mistaken for the editor's live view, and an opt-in `check_uid_divergence` probes the editor's in-memory `ResourceUID` over the bridge, reporting `UID_CACHE_DIVERGENCE` (with a restart recommendation — never a blind reimport) when editor and disk disagree.
+- **`input` exercises the real input pipeline.** Action commands previously used `Input.action_press()` (state-only — `_input` handlers never saw them). They now go through `parse_input_event` with real `InputEventAction`s by default (`via: "state"` keeps the legacy behavior), advance a configurable number of frames after press/release, validate action names up front, and report `delivery`/`pipeline_exercised`/`frames_advanced` so tests can't silently pass without the game reacting.
+- **`check_errors` no longer invents line 0.** On Godot versions where script error lines are unavailable, errors now report `line: null` + `line_unavailable: true` with softened confidence notes ("may still be real"), instead of a fabricated line 0 that read like a false positive.
+- **`validate(project)` no longer serves stale analysis after external edits.** Sessions now refresh known files mtime-gated before project-wide reads (`refresh_if_stale()`), per-file parse failures are tolerated and retried instead of breaking every code tool, and a failed scene re-parse serves the last good parse (self-healing on the next read) rather than evicting the scene forever.
+- **`scene_map` flags scenes without a stable UID** with a `scene_no_stable_uid` advisory (severity info), so renames/moves that would orphan text references are visible before they bite. Verified against the real engine: a missing-UID child still loads and instantiates (worst case an engine warning + path fallback), so this stays an advisory, not an error.
+- **`ping`/`editor_context` report live game state** (`is_playing_scene()`-backed) instead of a flag that could go stale on editor debug-session reuse, and both now include the editor `pid`.
+- **`scene_tree`/`scene_map` docstrings state what they actually show** (the editor's edited scene / static `.tscn` files on disk — not the running game), pointing to `state_inspect`/`ui_map`/`exec(context=game)` for runtime inspection.
+
+### Added
+
+- **`wait_for_import` bridge command** (also exposed as `editor_context(wait_for_import=true, wait_timeout_ms=...)`): an explicit, opt-in wait until the editor's filesystem scan/import queue is idle, for agents that need the editor state settled before reading context. Includes grace frames so a scan triggered immediately before the wait is reliably observed (validated 20/20 on a live editor; without them the wait raced the deferred scan start 18/20). All bridge operations remain fire-and-forget by default — nothing new blocks.
+- **Repeatable Wave-2 bridge smoke script** (`scripts/smoke_bridge_wave2.py`) driving the live editor+game stack through the public Python tools: not-attached contract path, then attach → screenshot → state_inspect → stop.
+
+### Tests
+
+- Test-first throughout: every fix above landed with regression tests (Python unit/integration plus headless GDScript contract tests for the addon-side behavior), including adversarial-review fixes for the fixes themselves. Full suite green at tag time; counts vary by environment (Godot-dependent contract tests skip without a local editor binary).
+
 ## [0.5.7] - 2026-06-04
 
 ### Fixed

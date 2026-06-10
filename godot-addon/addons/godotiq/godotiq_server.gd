@@ -4,12 +4,13 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.5.7"
+const ADDON_VERSION := "0.5.8"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
 const EXEC_TIMEOUT_MS := 10000
 const STATE_TIMEOUT_MS := 5000
+const RUN_ATTACH_TIMEOUT_MS := 3000
 var _exec_counter: int = 0
 
 var _tcp_server: TCPServer
@@ -20,6 +21,7 @@ var _pending_screenshot = null  # Deferred editor screenshot capture data
 var _pending_run = null  # Poll for scene play confirmation {peer_id, id, timeout_at, started_at}
 var _pending_scene_open = null  # Deferred scene open + play {peer_id, id, scene_path, timeout}
 var _game_running: bool = false
+var _runtime_attached: bool = false  # set by _capture via mark_runtime_attached()
 var _next_peer_id: int = 1
 var _port: int = DEFAULT_PORT
 var _bridge_token: String = ""
@@ -299,20 +301,21 @@ func _process(_delta: float) -> void:
 			"script_warnings": s.get("script_warnings", []),
 		}
 
-	# 4b. Poll for scene play confirmation
+	# 4b. Poll for scene play confirmation. Success is gated on the runtime
+	# attach heartbeat (own short sub-timeout): playing-but-unattached past
+	# the window still succeeds, but with an explicit runtime_attached:false
+	# + warning — never a bare success:true (BUG-02 readiness contract).
 	if _pending_run != null:
 		var r: Dictionary = _pending_run
-		if EditorInterface.is_playing_scene():
-			_pending_run = null
-			var waited: float = (Time.get_ticks_msec() - r.get("started_at", Time.get_ticks_msec())) / 1000.0
-			var resp := {"action": "play", "success": true, "scene": r.get("scene", ""), "waited_seconds": waited}
-			if r.get("main_scene_empty", false):
-				resp["main_scene_empty"] = true
-				resp["hint"] = "No main_scene set. Use set_main_scene to configure."
-			var sw = r.get("script_warnings", [])
-			if sw.size() > 0:
-				resp["script_warnings"] = sw
-			send_response(r["peer_id"], r["id"], resp)
+		if _is_game_playing():
+			if _runtime_attached:
+				_pending_run = null
+				send_response(r["peer_id"], r["id"], _build_run_response(r, true))
+			elif not r.has("attach_timeout_at"):
+				r["attach_timeout_at"] = Time.get_ticks_msec() + RUN_ATTACH_TIMEOUT_MS
+			elif Time.get_ticks_msec() > r["attach_timeout_at"]:
+				_pending_run = null
+				send_response(r["peer_id"], r["id"], _build_run_response(r, false))
 		elif Time.get_ticks_msec() > r["timeout_at"]:
 			_pending_run = null
 			var timeout_secs: float = (r["timeout_at"] - r.get("started_at", r["timeout_at"])) / 1000.0
@@ -406,6 +409,10 @@ func _dispatch(peer_id: int, id: String, method: String, params: Dictionary) -> 
 			_handle_set_main_scene(peer_id, id, params)
 		"reload_script":
 			_handle_reload_script(peer_id, id, params)
+		"uid_probe":
+			_handle_uid_probe(peer_id, id, params)
+		"wait_for_import":
+			_handle_wait_for_import(peer_id, id, params)
 		"explore_camera":
 			_handle_game_forward(peer_id, id, "godotiq:explore_camera", params, 10000)
 		_:
@@ -417,8 +424,13 @@ func _dispatch(peer_id: int, id: String, method: String, params: Dictionary) -> 
 func _handle_ping(peer_id: int, id: String) -> void:
 	send_response(peer_id, id, {
 		"editor_version": Engine.get_version_info().get("string", "unknown"),
-		"game_running": _game_running,
+		# Live editor state, not the stale-on-session-reuse flag — keeps the
+		# payload consistent with _editor_state.game_running.
+		"game_running": _is_game_playing(),
 		"addon_version": ADDON_VERSION,
+		# Editor process id — consumed by the Python editor-open guard to
+		# identify which editor holds this project (BUG-04).
+		"pid": OS.get_process_id(),
 	})
 
 
@@ -435,8 +447,11 @@ func _handle_editor_context(peer_id: int, id: String) -> void:
 	send_response(peer_id, id, {
 		"open_scenes": open_scenes,
 		"selected_nodes": selected,
-		"game_running": _game_running,
+		"game_running": _is_game_playing(),
 		"project_path": ProjectSettings.globalize_path("res://"),
+		# Editor process id — consumed by the Python editor-open guard to
+		# identify which editor holds this project (BUG-04).
+		"pid": OS.get_process_id(),
 	})
 
 
@@ -455,6 +470,82 @@ func _handle_set_main_scene(peer_id: int, id: String, params: Dictionary) -> voi
 		scene = "res://" + scene
 	var saved := _set_main_scene_internal(scene)
 	send_response(peer_id, id, {"main_scene": scene, "saved": saved})
+
+
+func _wait_for_import_idle(fs, timeout_ms: int) -> Dictionary:
+	# Poll until the editor filesystem scan/import queue is idle (BUG-08).
+	# "Idle" means the EDITOR's state is updated — on-disk import artifacts
+	# (.godot/imported) may still flush asynchronously. fs is untyped so
+	# contract tests can inject a fake in headless runs.
+	var start_ms: int = Time.get_ticks_msec()
+	var polls: int = 0
+	# Grace frames: scan() requested just before this call starts DEFERRED,
+	# so is_scanning() is still false on an immediate first check and the
+	# wait would return without covering the scan it was meant to observe
+	# (reproduced 18/20 in the BUG-08 loop, 2026-06-10).
+	for _grace in range(2):
+		if fs.is_scanning():
+			break
+		await Engine.get_main_loop().process_frame
+	while fs.is_scanning():
+		var waited: int = Time.get_ticks_msec() - start_ms
+		if waited >= timeout_ms:
+			return {
+				"idle": false,
+				"timed_out": true,
+				"waited_ms": waited,
+				"polls": polls,
+				"scan_progress": fs.get_scanning_progress(),
+			}
+		polls += 1
+		# Main-loop signal, not get_tree(): works even when this node is
+		# not (yet) inside the tree, which headless contract tests rely on.
+		await Engine.get_main_loop().process_frame
+	return {
+		"idle": true,
+		"timed_out": false,
+		"waited_ms": Time.get_ticks_msec() - start_ms,
+		"polls": polls,
+	}
+
+
+func _handle_wait_for_import(peer_id: int, id: String, params: Dictionary) -> void:
+	# Explicit, agent-requested wait — scan()/reimport stay fire-and-forget
+	# everywhere else; bridge ops must never block by default (BUG-08).
+	var timeout_ms: int = int(params.get("timeout_ms", 30000))
+	var status: Dictionary = await _wait_for_import_idle(
+		EditorInterface.get_resource_filesystem(), timeout_ms
+	)
+	send_response(peer_id, id, status)
+
+
+func _handle_uid_probe(peer_id: int, id: String, params: Dictionary) -> void:
+	# Read-only probe of the editor's IN-MEMORY ResourceUID view (BUG-05).
+	# Used by the Python uid_to_path/path_to_uid divergence check to compare
+	# editor memory against the fresh-disk resolution. Must never reimport
+	# or rescan — on divergence the recommended fix is an editor restart.
+	var uid_text: String = str(params.get("uid", ""))
+	var res_path: String = str(params.get("path", ""))
+	if uid_text.is_empty() and res_path.is_empty():
+		_send_error(peer_id, id, "MISSING_PARAM", "Provide 'uid' or 'path'")
+		return
+	if not uid_text.is_empty():
+		var uid_int := ResourceUID.text_to_id(uid_text)
+		var known := uid_int != ResourceUID.INVALID_ID and ResourceUID.has_id(uid_int)
+		send_response(peer_id, id, {
+			"probe": "uid_to_path",
+			"uid": uid_text,
+			"path": ResourceUID.get_id_path(uid_int) if known else null,
+		})
+		return
+	if not res_path.begins_with("res://"):
+		res_path = "res://" + res_path
+	var id_for_path := ResourceSaver.get_resource_id_for_path(res_path, false)
+	send_response(peer_id, id, {
+		"probe": "path_to_uid",
+		"path": res_path,
+		"uid": ResourceUID.id_to_text(id_for_path) if id_for_path != ResourceUID.INVALID_ID else null,
+	})
 
 
 func _handle_reload_script(peer_id: int, id: String, params: Dictionary) -> void:
@@ -497,6 +588,11 @@ func _collect_tscn_matches(dir: EditorFileSystemDirectory, scene_name: String, m
 
 
 func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
+	# Reset attachment at launch start — resetting only in on_game_stopped()
+	# leaves a stale-true window when the stopped callback is missed or a
+	# late capture from a previous session lands on the next run.
+	_runtime_attached = false
+
 	# Step 1: Save all open scenes
 	EditorInterface.save_all_scenes()
 
@@ -595,6 +691,29 @@ func _handle_run(peer_id: int, id: String, params: Dictionary) -> void:
 			"main_scene_empty": main_scene_empty,
 			"script_warnings": script_warnings,
 		}
+
+
+func _build_run_response(r: Dictionary, runtime_attached: bool) -> Dictionary:
+	var waited: float = (Time.get_ticks_msec() - r.get("started_at", Time.get_ticks_msec())) / 1000.0
+	var resp := {
+		"action": "play",
+		"success": true,
+		"scene": r.get("scene", ""),
+		"waited_seconds": waited,
+		"runtime_attached": runtime_attached,
+	}
+	if not runtime_attached:
+		resp["warning"] = (
+			"Scene is playing but the GodotIQ runtime did not attach; "
+			+ "runtime tools (screenshot, input, state_inspect, exec context=game) are unavailable."
+		)
+	if r.get("main_scene_empty", false):
+		resp["main_scene_empty"] = true
+		resp["hint"] = "No main_scene set. Use set_main_scene to configure."
+	var sw = r.get("script_warnings", [])
+	if sw.size() > 0:
+		resp["script_warnings"] = sw
+	return resp
 
 
 func _get_scripts_from_packed_scene(scene_path: String) -> Array[String]:
@@ -2101,23 +2220,41 @@ func _create_build_node(spec: Dictionary, parent: Node, scene_root: Node, ur) ->
 
 # --- Game-side forwarding ---
 
+func _is_game_playing() -> bool:
+	# Liveness comes from the editor, not from _game_running: that flag is
+	# driven only by the debugger `started` signal, which Godot does not
+	# re-fire on session reuse — unreliable from the second run on.
+	# (Also the contract-test seam: EditorInterface is editor-only.)
+	return EditorInterface.is_playing_scene()
+
+
 func _handle_game_forward(peer_id: int, id: String, msg_type: String, params: Dictionary, timeout_ms: int) -> void:
-	if not _game_running:
+	if not _is_game_playing():
 		_send_error(peer_id, id, "GAME_NOT_RUNNING", "No game session is running")
 		return
 	if debugger == null:
 		_send_error(peer_id, id, "NO_DEBUGGER", "Debugger plugin not available")
 		return
+	if not _runtime_attached:
+		_send_error(peer_id, id, "RUNTIME_NOT_ATTACHED",
+			"Game is running but the GodotIQ runtime did not attach; runtime tools are unavailable. Restart the game with godotiq_run to retry the handshake.")
+		return
 	var req_key := "%d:%s" % [peer_id, id]
+	var forward_params: Dictionary = params.duplicate(true)
+	forward_params["_request_id"] = req_key
+	# Register the pending entry only AFTER a successful send — a failed send
+	# must fail loud now, not linger until the timeout sweep.
+	var sent: bool = debugger.send_to_game(msg_type, [JSON.stringify(forward_params)])
+	if not sent:
+		_send_error(peer_id, id, "NO_GAME_SESSION",
+			"Debugger session unavailable; cannot reach the running game. Restart the game with godotiq_run.")
+		return
 	_pending_game_requests[req_key] = {
 		"peer_id": peer_id,
 		"request_id": id,
 		"method": msg_type,
 		"timeout_at": Time.get_ticks_msec() + timeout_ms,
 	}
-	var forward_params: Dictionary = params.duplicate(true)
-	forward_params["_request_id"] = req_key
-	debugger.send_to_game(msg_type, [JSON.stringify(forward_params)])
 
 
 func handle_game_response(response_type: String, data: Array) -> void:
@@ -2169,6 +2306,12 @@ func handle_game_response(response_type: String, data: Array) -> void:
 
 # --- Game lifecycle callbacks ---
 
+func mark_runtime_attached() -> void:
+	# Called by the debugger plugin on ANY godotiq:* capture — every captured
+	# message proves the game-side runtime registered its message capture.
+	_runtime_attached = true
+
+
 func on_game_started() -> void:
 	_game_running = true
 	send_event("game_started", {})
@@ -2176,6 +2319,7 @@ func on_game_started() -> void:
 
 func on_game_stopped() -> void:
 	_game_running = false
+	_runtime_attached = false
 	# Fail all pending game requests
 	for req_id in _pending_game_requests.keys():
 		var entry: Dictionary = _pending_game_requests[req_id]
@@ -2367,35 +2511,12 @@ func _handle_check_errors(peer_id: int, id: String, params: Dictionary):
 		checked += 1
 		if checked % 10 == 0:
 			await get_tree().process_frame
-	# Merge Logger entries — Logger entries replace basic errors for the same file
-	var final_errors: Array = []
-	if _has_logger:
-		var logger_entries := _get_script_errors()
-		var logger_by_file: Dictionary = {}  # file -> [entries]
-		for entry in logger_entries:
-			if not logger_by_file.has(entry.file):
-				logger_by_file[entry.file] = []
-			logger_by_file[entry.file].append({"file": entry.file, "line": entry.line, "error": entry.message})
-		# For files with Logger entries, use those instead of basic errors
-		for file_path in basic_errors:
-			if logger_by_file.has(file_path):
-				final_errors.append_array(logger_by_file[file_path])
-				logger_by_file.erase(file_path)
-			else:
-				final_errors.append(basic_errors[file_path])
-		# Add Logger entries for files not in basic_errors
-		for file_path in logger_by_file:
-			final_errors.append_array(logger_by_file[file_path])
-	else:
-		final_errors = basic_errors.values()
-	# Deduplicate by file+line+message
-	var seen := {}
-	var deduped: Array = []
-	for err in final_errors:
-		var key := "%s|%d|%s" % [err.file, err.line, err.error]
-		if not seen.has(key):
-			seen[key] = true
-			deduped.append(err)
+	# Let trailing async Logger callbacks land before the merge — the check
+	# loop only yields every 10 scripts, so the last <10 batch may still be
+	# in flight when we read _get_script_errors().
+	await get_tree().process_frame
+	var logger_entries: Array = _get_script_errors() if _has_logger else []
+	var deduped := _merge_and_dedup_errors(basic_errors, logger_entries)
 	_checking_errors = false
 	send_response(peer_id, id, {
 		"errors": deduped,
@@ -2405,14 +2526,49 @@ func _handle_check_errors(peer_id: int, id: String, params: Dictionary):
 	})
 
 
+func _merge_and_dedup_errors(basic_errors: Dictionary, logger_entries: Array) -> Array:
+	# Logger entries carry a real line and replace the line-unavailable basic
+	# error for the same file.
+	var final_errors: Array = []
+	var logger_by_file: Dictionary = {}  # file -> [entries]
+	for entry in logger_entries:
+		if not logger_by_file.has(entry.file):
+			logger_by_file[entry.file] = []
+		logger_by_file[entry.file].append({"file": entry.file, "line": entry.line, "error": entry.message})
+	# For files with Logger entries, use those instead of basic errors
+	for file_path in basic_errors:
+		if logger_by_file.has(file_path):
+			final_errors.append_array(logger_by_file[file_path])
+			logger_by_file.erase(file_path)
+		else:
+			final_errors.append(basic_errors[file_path])
+	# Add Logger entries for files not in basic_errors
+	for file_path in logger_by_file:
+		final_errors.append_array(logger_by_file[file_path])
+	# Deduplicate by file+line+message. All string placeholders on purpose:
+	# basic errors carry line:null (line_unavailable) and an int placeholder
+	# on null is unsafe.
+	var seen := {}
+	var deduped: Array = []
+	for err in final_errors:
+		var key := "%s|%s|%s" % [err.file, str(err.line), err.error]
+		if not seen.has(key):
+			seen[key] = true
+			deduped.append(err)
+	return deduped
+
+
 func _check_loaded_script(path: String, script_res) -> Dictionary:
+	# GDScript.reload() returns only an int error code — there is no real
+	# line to report. line:null + line_unavailable:true, never a hardcoded
+	# 0: the error is often real and a fake line 0 reads as a false positive.
 	if script_res == null:
-		return {"file": path, "line": 0, "error": "Failed to load script"}
+		return {"file": path, "line": null, "line_unavailable": true, "error": "Failed to load script"}
 	if not script_res.has_method("reload"):
 		return {}
 	var reload_err: int = int(script_res.reload())
 	if reload_err != OK:
-		return {"file": path, "line": 0, "error": "Script reload failed (error %d)" % reload_err}
+		return {"file": path, "line": null, "line_unavailable": true, "error": "Script reload failed (error %d)" % reload_err}
 	return {}
 
 

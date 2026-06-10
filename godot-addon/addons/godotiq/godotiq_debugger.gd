@@ -15,7 +15,13 @@ func _capture(message: String, data: Array, session_id: int) -> bool:
 	if server == null:
 		push_warning("GodotIQ debugger: received message but server is null")
 		return false
+	# Any godotiq:* message proves the runtime is alive and attached —
+	# _has_capture guarantees the prefix. This is signal-independent, unlike
+	# the started/stopped wiring that Godot does not re-run on session reuse.
+	server.mark_runtime_attached()
 	match message:
+		"godotiq:runtime_ready":
+			return true
 		"godotiq:screenshot_result":
 			server.handle_game_response("godotiq:screenshot", data)
 			return true
@@ -87,7 +93,9 @@ func _on_game_stopped() -> void:
 	# start/stop cycles without calling _setup_session again.
 
 
-func send_to_game(message: String, data: Array) -> void:
+func send_to_game(message: String, data: Array) -> bool:
+	# Returns send status so the server can fail fast (NO_GAME_SESSION)
+	# instead of leaving a dangling pending request for the timeout sweep.
 	if _session_id < 0:
 		# Fallback: try to find a valid session (IDs start at 0)
 		for candidate_id in range(0, 4):
@@ -97,10 +105,18 @@ func send_to_game(message: String, data: Array) -> void:
 				break
 	if _session_id < 0:
 		push_warning("GodotIQ debugger: no active session, cannot send '%s'" % message)
-		return
+		return false
 	var session := get_session(_session_id)
 	if session == null:
 		push_warning("GodotIQ debugger: session %d not found" % _session_id)
 		_session_id = -1
-		return
+		return false
+	# Godot reuses debugger sessions across game start/stop cycles without
+	# re-running _setup_session — re-bind lifecycle signals per forward so
+	# started/stopped stay wired from the second run on.
+	if not session.started.is_connected(_on_game_started):
+		session.started.connect(_on_game_started)
+	if not session.stopped.is_connected(_on_game_stopped):
+		session.stopped.connect(_on_game_stopped)
 	session.send_message(message, data)
+	return true

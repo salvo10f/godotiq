@@ -25,6 +25,10 @@ func _ready() -> void:
 		return
 	EngineDebugger.register_message_capture("godotiq", _on_debugger_message)
 	_install_runtime_logger()
+	# Proactive attach heartbeat on the same channel _flush_runtime_log_errors
+	# uses — the editor must learn the runtime attached BEFORE any tool
+	# request, otherwise `run` reports success for an un-instrumented game.
+	EngineDebugger.send_message("godotiq:runtime_ready", [JSON.stringify({"pid": OS.get_process_id()})])
 	print("[GodotIQ] Message capture registered")
 
 
@@ -363,20 +367,55 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 	if cmd.has("actions"):
 		var actions: Array = cmd["actions"]
 		var hold_ms: int = cmd.get("hold_ms", 70)
+		# via:"event" (default) delivers a real InputEventAction through
+		# Input.parse_input_event — the real pipeline (_input /
+		# _unhandled_input / GUI). via:"state" keeps the legacy
+		# Input.action_press path: polling-only, does NOT reach _input.
+		var via: String = str(cmd.get("via", "event"))
+		var use_event: bool = via != "state"
+		var step_frames: int = int(cmd.get("step_frames", 2))
+
+		# Validate all actions up front so a typo cannot leave earlier
+		# actions stuck pressed.
+		for action_name in actions:
+			if not InputMap.has_action(action_name):
+				return {"type": "action", "actions": actions, "ok": false, "error": "Unknown action: %s" % action_name}
 
 		for action_name in actions:
-			if InputMap.has_action(action_name):
-				Input.action_press(action_name)
+			if use_event:
+				var press := InputEventAction.new()
+				press.action = action_name
+				press.pressed = true
+				Input.parse_input_event(press)
 			else:
-				return {"type": "action", "actions": actions, "ok": false, "error": "Unknown action: %s" % action_name}
+				Input.action_press(action_name)
+
+		# Deterministic stepping: give the pipeline real frames before the
+		# hold window so handlers observe the press.
+		var frames_advanced: int = await _advance_frames(step_frames)
 
 		await get_tree().create_timer(hold_ms / 1000.0).timeout
 
 		for action_name in actions:
-			if InputMap.has_action(action_name):
+			if use_event:
+				var release := InputEventAction.new()
+				release.action = action_name
+				release.pressed = false
+				Input.parse_input_event(release)
+			else:
 				Input.action_release(action_name)
 
-		return {"type": "action", "actions": actions, "hold_ms": hold_ms, "ok": true}
+		frames_advanced += await _advance_frames(step_frames)
+
+		return {
+			"type": "action",
+			"actions": actions,
+			"hold_ms": hold_ms,
+			"ok": true,
+			"delivery": "real_event" if use_event else "action_state",
+			"pipeline_exercised": use_event,
+			"frames_advanced": frames_advanced,
+		}
 
 	if cmd.has("key"):
 		var key_name: String = cmd["key"]
@@ -448,6 +487,14 @@ func _execute_input_command(cmd: Dictionary) -> Dictionary:
 		return {"type": "tap", "target": target_name, "position": [center.x, center.y], "ok": true}
 
 	return {"type": "unknown", "ok": false, "error": "Unrecognized command format"}
+
+
+func _advance_frames(count: int) -> int:
+	var advanced := 0
+	for i in range(maxi(0, count)):
+		await get_tree().process_frame
+		advanced += 1
+	return advanced
 
 
 func _dispatch_click(screen_pos: Vector2, button_index: int) -> void:
