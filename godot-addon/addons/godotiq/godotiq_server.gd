@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.5.8"
+const ADDON_VERSION := "0.5.9"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -557,7 +557,11 @@ func _handle_reload_script(peer_id: int, id: String, params: Dictionary) -> void
 	if script == null or not (script is GDScript):
 		send_response(peer_id, id, {"reloaded": false, "error": "Failed to load script: %s" % path})
 		return
-	var err: int = script.reload()
+	# Typed local: a user script declaring a non-static reload() shadows the
+	# untyped call (callp yields null → Nil-to-int crash); the typed call
+	# binds the native GDScript.reload().
+	var gd_script: GDScript = script
+	var err: int = gd_script.reload()
 	if err != OK:
 		send_response(peer_id, id, {"reloaded": false, "error": "Reload failed with code %d" % err})
 		return
@@ -759,7 +763,10 @@ func _check_scripts_valid(script_paths: Array[String]) -> Array[Dictionary]:
 		if res == null:
 			errors.append({"file": path, "error": "Failed to load script"})
 		elif res is GDScript:
-			var err: int = res.reload()
+			# Typed local — see _check_loaded_script: a non-static reload()
+			# shadow crashes the untyped call path.
+			var gd_script: GDScript = res
+			var err: int = gd_script.reload()
 			if err != OK:
 				errors.append({"file": path, "error": "Script reload failed (error %d)" % err})
 	return errors
@@ -2564,9 +2571,21 @@ func _check_loaded_script(path: String, script_res) -> Dictionary:
 	# 0: the error is often real and a fake line 0 reads as a false positive.
 	if script_res == null:
 		return {"file": path, "line": null, "line_unavailable": true, "error": "Failed to load script"}
-	if not script_res.has_method("reload"):
+	# A project script may declare its own non-static `reload()` (an FPS
+	# weapon, say): the untyped call dispatches through callp, which refuses
+	# the non-static shadow and yields null — int(null) then crashed HERE,
+	# making check_errors flag the addon itself as a permanent project
+	# error. A GDScript-typed local binds the native method instead, so the
+	# shadowing script is still genuinely compile-checked.
+	var reload_result
+	if script_res is GDScript:
+		var gd_script: GDScript = script_res
+		reload_result = gd_script.reload()
+	elif script_res.has_method("reload"):
+		reload_result = script_res.reload()
+	else:
 		return {}
-	var reload_err: int = int(script_res.reload())
+	var reload_err: int = reload_result if reload_result is int else OK
 	if reload_err != OK:
 		return {"file": path, "line": null, "line_unavailable": true, "error": "Script reload failed (error %d)" % reload_err}
 	return {}
