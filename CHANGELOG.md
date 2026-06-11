@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.11] - 2026-06-12
+
+Driven by the second round of externally reported tool limitations, every claim re-verified against the code before fixing (docs/plans/customer-feedback-fixes-2026-06-11.md). The theme: analysis tools must neither invent issues nor stay silent about what they could not see.
+
+### Fixed
+
+- **`animation_info` and `animation_audit` finally see AnimationLibrary `.tres` files loaded via ExtResource.** The extraction chain only resolved inline `sub_resource` libraries, so a scene whose AnimationPlayer loads its library from a `.tres` file reported 0 animations — no orphan or broken-track detection, plus a bogus `empty_player` warning (the externally reported "0 animations" symptom; inline libraries were always fine). Both tools now follow `ext_resource` refs: animations defined inside the `.tres` carry full details (`source: "tres_library"`, additive `file` key), and animations the library itself references as external `.res`/`.tres` files surface by name (`source: "external"`) without requiring those files to exist or be parsable.
+- **`animation_audit` no longer flags `autoplay`/`current_animation` animations as orphans** (Pro). The orphan check only collected `play()`/`travel()`/ANIM_MAP/AnimationTree references and never read the AnimationPlayer's own properties — an animation the engine plays by itself was reported as "never referenced".
+- **`placement` honors `constraints.marker_group` — previously documented but never read.** An explicit marker group (string or list) now overrides the `object_type` inference; with no `near`/`near_position` at all, marker-first mode uses the group's free markers as the candidates instead of failing with the baffling `Reference 'None' not found in scene`. With no reference parameters whatsoever the error now says exactly what to provide; the `near` not-found message is byte-identical to before (Pro).
+
+### Added
+
+- **Real `.tres` resource parser** (`godotiq.parsers.tres_parser.parse_tres`), replacing the Sprint-0 `NotImplementedError` placeholder. Same text dialect as `.tscn`, so it reuses the existing parsing infrastructure and adds the `[resource]` section — this is what unlocks the external-AnimationLibrary fixes above.
+- **`build_scene` grid auto-spacing is never silent anymore.** Every response for a grid without explicit `spacing` carries an additive `auto_spacing` key: `{"applied": true, value, source}` when tile_size/GLB bounds resolved it, `{"applied": false, reason}` with a specific reason otherwise (non-GLB scene, invalid `tile_size`, unreadable bounds, no session, zero size). The addon-side 1.0 fallback is unchanged — callers can now see why it kicked in. There is, and never was, a minimum tile count: 1x2 and 2x2 grids auto-space exactly like 3x3, now locked by tests against a real GLB.
+- **`spatial_audit` detects real geometric overlap and declares its own coverage** (Pro). The overlap check previously compared instance-root positions at < 0.01m only, so two primitive boxes interpenetrating by a full meter reported "0 issues". Approximate world AABBs are now derived where data exists (primitive mesh sub_resources, world-scaled; GLB instance bounds) and interpenetration beyond a conservative threshold (20% of the smaller object's smallest dimension — adjacency never flags) is reported as severity `info` under the same `overlapping` check. Ancestor-descendant pairs are excluded. A new additive `coverage` block declares what each geometric check evaluated vs skipped (`evaluated`, `skipped_no_bounds`, active floating threshold) — treat 0 issues with low coverage as "not verified", not "verified clean". New optional `floating_threshold` parameter (default 100.0, unchanged) lets ground-level scenes lower the floating-objects bar; older Pro bundles safely receive the legacy call.
+
 ## [0.5.10] - 2026-06-11
 
 Hotfix for the externally reported node_ops false-success family, reproduced live on 0.5.9 + Godot 4.6 (docs/plans/nodeops-false-success-2026-06-11.md). The theme: a mutation tool may never answer "ok, scene modified" unless the live editor tree actually shows the change.
