@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.12] - 2026-06-12
+
+Third round of the externally driven feedback loop: a full 38-tool sweep on a fresh Godot 4 project confirmed the 0.5.10/0.5.11 fixes and surfaced what remained — every claim reproduced against the code before fixing. The theme: read what today's Godot actually writes, and never promise what a tool does not do.
+
+### Fixed
+
+- **`animation_info` and `animation_audit` read Godot 4.4+ `libraries/` property-path serialization.** Godot 4.4 changed how AnimationPlayer serializes its libraries: from the dict form `libraries = {"": ExtResource(...)}` to per-property paths `libraries/ = ExtResource(...)` / `libraries/<name> = ...`. The extraction only handled the dict form, so on any scene saved by a current editor the 0.5.11 external-library fix never engaged — 0 animations reported plus a bogus `empty_player` warning (the re-reported customer symptom; the exact reproduction pair now lives in the test suite). Both forms are handled in both tools, for ExtResource and inline SubResource libraries, named or default. On a (hand-written) cross-form name clash the newer serialization wins deterministically, and the `&""` StringName spelling of the default library name in dict form is stripped correctly now too.
+- **The `.tscn` parser merges `metadata/_groups` into `node.groups`.** Nodes grouped through metadata — a common pattern for tool-driven workflows that cannot write the header `groups=[...]` attribute — were invisible to every group consumer: `placement` could not find such markers and `spatial_audit`'s `empty_markers` check never fired on them. Plain lists, `PackedStringArray(...)` and `&"StringName"` items are normalized and deduplicated against header groups; `node.metadata["_groups"]` is preserved untouched. Empty containers (`PackedStringArray()`, `[]`) can never produce a phantom group name, and non-string items are skipped rather than stringified.
+
+### Docs
+
+- **`validate` no longer claims compilation checking.** The injected rules said "validate (Pro: conventions + compilation)"; the implementation is conventions-only by design (six rules, severity warning/info — it cannot emit errors). The rules, the degraded-mode example (which showed an impossible "2 errors" teaser), the README ("auto-fixes" — validate is read-only) and the Community teaser text now describe exactly what validate does, and route compilation evidence to `check_errors` for both tiers — externally verified to match the editor LSP line-for-line. Bridge tools listed under "no addon needed" are now marked as requiring the addon.
+
+### Internal
+
+- Public/Pro animation helper parity is enforced by a test (the two copies drifted once before; bundle-side, gated to lockstep versions), and the Pro metadata-groups tests skip on hosts older than 0.5.12 instead of failing the advisory CI.
+
 ## [0.5.11] - 2026-06-12
 
 Driven by the second round of externally reported tool limitations, every claim re-verified against the code before fixing (docs/plans/customer-feedback-fixes-2026-06-11.md). The theme: analysis tools must neither invent issues nor stay silent about what they could not see.
