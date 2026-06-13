@@ -2,13 +2,13 @@
 
 Intelligent MCP server for Godot 4. Spatial intelligence, code analysis, and **38 tools**.
 
-**Version:** 0.5.12
+**Version:** 0.5.13
 **Repository:** https://github.com/salvo10f/godotiq
 
 ## Install
 
 ```bash
-pip install godotiq==0.5.12
+pip install godotiq==0.5.13
 ```
 
 For AI clients, no manual install is required. Use `uvx` in your MCP config so the

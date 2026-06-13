@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.13] - 2026-06-13
+
+Hotfix for Pro entitlement activation receipts rejected as `not_yet_valid` on otherwise-correct customer machines.
+
+### Fixed
+
+- **Fresh Pro receipts now tolerate normal client/Worker clock skew.** The Worker now backdates receipt `nbf` by 30 seconds when issuing activation and refresh receipts, and the client verifies freshly received signed receipts with a matching bounded skew allowance. This fixes the race where the Worker emitted `nbf == iat` and the Python client checked `int(time.time())` strictly, causing valid receipts to be rejected before they could be cached.
+- **Activation retry behavior is safer around this receipt race.** A receipt whose `iat` is only slightly ahead of the local whole-second clock is accepted and persisted, while genuinely future receipts remain rejected as `not_yet_valid`.
+
 ## [0.5.12] - 2026-06-12
 
 Third round of the externally driven feedback loop: a full 38-tool sweep on a fresh Godot 4 project confirmed the 0.5.10/0.5.11 fixes and surfaced what remained — every claim reproduced against the code before fixing. The theme: read what today's Godot actually writes, and never promise what a tool does not do.
