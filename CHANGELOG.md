@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.14] - 2026-07-03
+
+R0 "Perception and contract" — the highest-leverage fixes from the July 2026 full-product audit: the model now actually SEES screenshots (MCP ImageContent instead of base64-in-JSON), the behavioral contract always reaches the model (MCP server instructions), the most frequent dead-end errors teach the next step, and existing-but-invisible capabilities are documented. Everything is additive or opt-out; no Pro bundle change (zero-delta).
+
+**After upgrading, re-install the addon in your projects** (`pip install -U godotiq`, then `godotiq install-addon <project>` and restart the Godot editor): the teaching errors live in the addon.
+
+### Added
+
+- **Screenshots are delivered as real MCP image blocks the model can see.** `godotiq_screenshot` and `godotiq_explore` grow a `delivery` parameter: `"image"` (the new default) returns `[metadata JSON, image block, ...]` — the model receives pixels, not a base64 text blob, so visual verification is real instead of hallucinated. `"legacy"` returns the exact pre-0.5.14 dict (base64 inside `result["image"]` / `screenshots[]`) for clients that cannot render MCP images; the env var `GODOTIQ_IMAGE_DELIVERY` sets the global default and an explicit argument wins. For explore, the i-th image block pairs with `screenshots[i]` in the metadata. Invalid modes or corrupt image data never fail the call — they degrade to the legacy dict with a `delivery_warning`. MIME types are normalized (`jpg`→`image/jpeg`; the SDK helper alone would emit the nonexistent `image/jpg`).
+- **The CORE behavioral contract ships as MCP server `instructions`.** Hosts inject server instructions into the system context at session start, so the contract now arrives even when convention files (CLAUDE.md, .cursorrules, ...) are truncated or skipped. Extraction is shared with `install-addon` (new `godotiq.rules` module — one source of truth) and the loader is fail-safe: a broken rules source degrades to no instructions, never a startup failure.
+- **Errors that teach (addon).** All 12 node-lookup failure sites in `node_ops` now return `code: "NODE_NOT_FOUND"`, a `did_you_mean` list (up to 5 near-match paths, bigram-similarity ranked — catches `Playr`→`Player` typos) and a hint pointing at `scene_tree(detail='brief')`. `set_property` finally distinguishes its two failure modes: a property that EXISTS but is null (e.g. a fresh `CollisionShape2D.shape`) reports the honest `PROPERTY_IS_NULL` with `property_class`/`property_type` and the working `godotiq_exec` workaround, instead of the misleading "Property not found"; a truly missing property reports `PROPERTY_NOT_FOUND` with `valid_properties` (first 15 editor-visible names, most-derived class first) and `did_you_mean` on near matches. `rotate`/`scale` on non-Node3D keep their error and gain the true 2D workaround hint (`set_property("rotation_degrees", ...)` / `set_property("scale", [x, y])`). Covered by new editor-headless contract tests on a real Godot 4.6.
+- **`godotiq_ping` reports `rules_freshness`** — the GODOTIQ_RULES.md staleness state (ok/outdated/missing/... with versions and the install-addon hint) that previously lived only in stderr logs, so the model can self-diagnose stale rules.
+- **Hidden capabilities documented** (pinned by a new docs-contract test): `node_ops` `set_anchors` (16 Control presets), `build_scene` `grid.axis` (`"xz"` default 3D ground plane, `"xy"` for 2D), `input` `click_at`/`click_at_world` (3D-only)/`mouse_motion`, `camera` vs `explore` distinction, when to prefer `watch` over repeated `state_inspect`, `perf_snapshot` reading thresholds, `run` scene-resolution modes and the `main_scene_empty` signal.
+
+### Changed
+
+- **`detail` defaults to `"brief"` on the 4 costliest-output tools**: `asset_registry`, `scene_map`, `scene_tree`, `validate`. Their full payloads can emit 50k–140k chars; if you relied on the extended output, pass `detail="normal"` (or `"full"`) explicitly. All other tools keep `"normal"`.
+- **`mcp` dependency floor raised from `>=1.0.0` to `>=1.12.4`** — mixed-content tool returns on the public call path and FastMCP `instructions` require it (probe matrix: 1.2.0 lacks instructions, 1.6.0 is the functional minimum, 1.12.4 is the prudent floor). The floor is pinned by an in-process client-session test.
+- **The 3D-only spatial stack now says so**: `scene_map`, `spatial_audit`, `placement`, `suggest_scale`, `explore`, `nav_query`, `camera` and `screenshot(viewport="editor")` docstrings carry an explicit "3D-only: on 2D scenes returns incomplete or misleading data" disclaimer, and the `node_ops` advice "ALWAYS validate:true" is now scoped to 3D (spatial validation returns BLOCKED on 2D scenes). Runtime 2D guardrails remain a separate plan.
+- `godotiq_screenshot` and `godotiq_explore` no longer emit `structuredContent` (their return annotation had to drop `-> dict` to support mixed content; the TextContent JSON payload is unchanged in legacy mode).
+- README: activating a Pro key now spells out the mandatory full MCP-client restart per client, with the `godotiq_ping` verification step.
+
 ## [0.5.13] - 2026-06-13
 
 Hotfix for Pro entitlement activation receipts rejected as `not_yet_valid` on otherwise-correct customer machines.

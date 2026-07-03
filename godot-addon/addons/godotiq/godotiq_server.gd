@@ -4,7 +4,7 @@ extends Node
 ## dispatches requests to editor handlers or forwards to the running game.
 
 const DEFAULT_PORT := 6007
-const ADDON_VERSION := "0.5.13"
+const ADDON_VERSION := "0.5.14"
 const SCREENSHOT_TIMEOUT_MS := 30000
 const PERF_TIMEOUT_MS := 5000
 const INPUT_TIMEOUT_MS := 65000
@@ -1170,6 +1170,116 @@ func _find_node_by_name_or_path(name_or_path: String, scene_root: Node) -> Node:
 	return _find_by_name_recursive(scene_root, name_or_path)
 
 
+## Up to 5 case-insensitive near-matches for a failed node lookup, as
+## scene-root-relative paths, best first. Uses String.similarity()
+## (built-in bigram Dice coefficient) plus substring containment — cheap,
+## no Levenshtein needed (audit R0-3: errors must teach the next step).
+func _node_suggestions(name_or_path: String, scene_root: Node) -> Array:
+	if scene_root == null:
+		return []
+	var segments := name_or_path.split("/", false)
+	if segments.is_empty():
+		return []
+	var target := str(segments[segments.size() - 1]).to_lower()
+	if target.is_empty():
+		return []
+	var scored: Array = []
+	var stack: Array = [scene_root]
+	while not stack.is_empty():
+		var current: Node = stack.pop_back()
+		for child in current.get_children():
+			stack.append(child)
+		if current == scene_root:
+			continue
+		var lname := str(current.name).to_lower()
+		var score := lname.similarity(target)
+		if lname == target:
+			score = 1.0
+		elif lname.contains(target) or target.contains(lname):
+			score = maxf(score, 0.75)
+		if score >= 0.5:
+			scored.append({"path": str(scene_root.get_path_to(current)), "score": score})
+	scored.sort_custom(func(a, b): return a["score"] > b["score"])
+	var out: Array = []
+	for entry in scored:
+		out.append(entry["path"])
+		if out.size() >= 5:
+			break
+	return out
+
+
+## Enriches a per-op "not found" error with teaching fields: a stable
+## code, up to 5 did_you_mean paths, and the recovery hint. Additive
+## only — existing keys are never touched.
+func _with_node_suggestions(err: Dictionary, missing_name: String, scene_root: Node) -> Dictionary:
+	err["code"] = "NODE_NOT_FOUND"
+	err["hint"] = "Call godotiq_scene_tree(detail='brief') to see valid paths."
+	var suggestions := _node_suggestions(missing_name, scene_root)
+	if not suggestions.is_empty():
+		err["did_you_mean"] = suggestions
+	return err
+
+
+## Property metadata from the node's own property list ({} when absent).
+## get_property_list() covers built-ins AND script variables and never
+## assumes the property is a Resource.
+func _property_info(node: Node, prop_name: String) -> Dictionary:
+	for p in node.get_property_list():
+		if str(p.get("name", "")) == prop_name:
+			return p
+	return {}
+
+
+## First 15 editor-visible property names of the node (category/group
+## markers filtered out) — for teaching PROPERTY_NOT_FOUND errors.
+## get_property_list() walks base classes first; iterate it reversed so
+## the most derived class' properties (position, shape, script vars —
+## the ones an agent actually wants) surface before Node internals.
+func _valid_property_names(node: Node) -> Array:
+	var props := node.get_property_list()
+	props.reverse()
+	var names: Array = []
+	for p in props:
+		var usage := int(p.get("usage", 0))
+		if usage & PROPERTY_USAGE_EDITOR == 0:
+			continue
+		if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+			continue
+		var pname := str(p.get("name", ""))
+		if pname.is_empty() or pname == "script" or pname.begins_with("metadata/"):
+			continue
+		names.append(pname)
+		if names.size() >= 15:
+			break
+	return names
+
+
+## Property names similar to the requested one (best first, max 5).
+func _property_suggestions(node: Node, prop_name: String) -> Array:
+	var target := prop_name.to_lower()
+	if target.is_empty():
+		return []
+	var scored: Array = []
+	for p in node.get_property_list():
+		var pname := str(p.get("name", ""))
+		if pname.is_empty():
+			continue
+		var lname := pname.to_lower()
+		var score := lname.similarity(target)
+		if lname.contains(target) or target.contains(lname):
+			score = maxf(score, 0.75)
+		if score >= 0.5:
+			scored.append({"name": pname, "score": score})
+	scored.sort_custom(func(a, b): return a["score"] > b["score"])
+	var out: Array = []
+	for entry in scored:
+		if not out.has(entry["name"]):
+			out.append(entry["name"])
+		if out.size() >= 5:
+			break
+	return out
+
+
 ## Blocks mutations that would be silently dropped on save because the target
 ## node is internal to an instanced child scene (owner != scene_root, E7).
 ## Property overrides are allowed when the instance has Editable Children
@@ -1240,7 +1350,7 @@ func _op_move(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "move", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "move", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	var pos = op_data.get("position", op_data.get("value", [0, 0, 0]))
 	if not _is_numeric_array(pos, 2):
@@ -1273,10 +1383,10 @@ func _op_rotate(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "rotate", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "rotate", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	if not (node is Node3D):
-		return {"op": "rotate", "node": node_name, "status": "error", "error": "Rotate only supports Node3D"}
+		return {"op": "rotate", "node": node_name, "status": "error", "error": "Rotate only supports Node3D", "hint": "For Node2D/Control use set_property(\"rotation_degrees\", <degrees>) instead — it works today."}
 
 	var rot = op_data.get("rotation", op_data.get("value", [0, 0, 0]))
 	if not _is_numeric_array(rot, 3):
@@ -1293,10 +1403,10 @@ func _op_scale(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "scale", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "scale", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	if not (node is Node3D):
-		return {"op": "scale", "node": node_name, "status": "error", "error": "Scale only supports Node3D"}
+		return {"op": "scale", "node": node_name, "status": "error", "error": "Scale only supports Node3D", "hint": "For Node2D/Control use set_property(\"scale\", [x, y]) instead — it works today."}
 
 	var sc = op_data.get("scale", op_data.get("value", [1, 1, 1]))
 	if not _is_numeric_array(sc, 3):
@@ -1313,7 +1423,7 @@ func _op_set_property(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "set_property", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "set_property", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	var property: String = str(op_data.get("property", ""))
 	var value = op_data.get("value")
@@ -1324,7 +1434,41 @@ func _op_set_property(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 
 	var old_value = node.get(base_property)
 	if old_value == null:
-		return {"op": "set_property", "node": node_name, "status": "error", "error": "Property not found: %s" % property}
+		# Two distinct failures used to collapse into one misleading
+		# "Property not found" (audit R0-3): a property can EXIST and be
+		# null — a typed object slot never assigned, e.g. a fresh
+		# CollisionShape2D.shape. get_property_list() tells the cases
+		# apart without assuming the property is a Resource.
+		var info := _property_info(node, base_property)
+		if info.is_empty():
+			var not_found := {
+				"op": "set_property",
+				"node": node_name,
+				"status": "error",
+				"code": "PROPERTY_NOT_FOUND",
+				"error": "Property not found: %s" % property,
+				"valid_properties": _valid_property_names(node),
+			}
+			var prop_suggestions := _property_suggestions(node, base_property)
+			if not prop_suggestions.is_empty():
+				not_found["did_you_mean"] = prop_suggestions
+			return not_found
+		var is_null := {
+			"op": "set_property",
+			"node": node_name,
+			"status": "error",
+			"code": "PROPERTY_IS_NULL",
+			"error": (
+				"Property '%s' exists but is currently null; assigning it requires "
+				+ "typed resource support not implemented yet — use godotiq_exec "
+				+ "(context=\"editor\") as the documented workaround."
+			) % base_property,
+			"property_type": type_string(int(info.get("type", TYPE_NIL))),
+		}
+		var prop_class := str(info.get("class_name", ""))
+		if not prop_class.is_empty():
+			is_null["property_class"] = prop_class
+		return is_null
 
 	if parts.size() > 1:
 		# Sub-path: modify only the component
@@ -1367,7 +1511,7 @@ func _op_add_child(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var parent_name: String = str(op_data.get("parent", ""))
 	var parent := _find_node_by_name_or_path(parent_name, scene_root)
 	if parent == null:
-		return {"op": "add_child", "status": "error", "error": "Parent not found: %s" % parent_name}
+		return _with_node_suggestions({"op": "add_child", "status": "error", "error": "Parent not found: %s" % parent_name}, parent_name, scene_root)
 
 	var new_node: Node = null
 	var scene_path: String = str(op_data.get("scene", ""))
@@ -1416,7 +1560,7 @@ func _op_delete(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "delete", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "delete", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	if node == scene_root:
 		return {"op": "delete", "node": node_name, "status": "error", "error": "Cannot delete scene root"}
@@ -1433,7 +1577,7 @@ func _op_duplicate(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "duplicate", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "duplicate", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	var dup := node.duplicate()
 	var dup_name: String = str(op_data.get("name", str(node.name) + "_copy"))
@@ -1451,12 +1595,12 @@ func _op_reparent(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "reparent", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "reparent", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	var new_parent_name: String = str(op_data.get("new_parent", ""))
 	var new_parent := _find_node_by_name_or_path(new_parent_name, scene_root)
 	if new_parent == null:
-		return {"op": "reparent", "node": node_name, "status": "error", "error": "New parent not found: %s" % new_parent_name}
+		return _with_node_suggestions({"op": "reparent", "node": node_name, "status": "error", "error": "New parent not found: %s" % new_parent_name}, new_parent_name, scene_root)
 
 	var old_parent := node.get_parent()
 	ur.add_do_method(old_parent, "remove_child", node)
@@ -1472,7 +1616,7 @@ func _op_set_anchors(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var node_name: String = str(op_data.get("node", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "set_anchors", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "set_anchors", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 
 	if not (node is Control):
 		return {"op": "set_anchors", "node": node_name, "status": "error", "error": "Node is not a Control: %s" % node_name}
@@ -1544,7 +1688,7 @@ func _op_rename(op_data: Dictionary, scene_root: Node, ur) -> Dictionary:
 	var new_name: String = str(op_data.get("new_name", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "rename", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "rename", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 	if new_name.is_empty():
 		return {"op": "rename", "node": node_name, "status": "error", "error": "new_name must not be empty"}
 	var old_name: String = node.name
@@ -1558,7 +1702,7 @@ func _op_get_property(op_data: Dictionary, scene_root: Node) -> Dictionary:
 	var property_name: String = str(op_data.get("property", ""))
 	var node := _find_node_by_name_or_path(node_name, scene_root)
 	if node == null:
-		return {"op": "get_property", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}
+		return _with_node_suggestions({"op": "get_property", "node": node_name, "status": "error", "error": "Node not found: %s" % node_name}, node_name, scene_root)
 	if property_name.is_empty():
 		return {"op": "get_property", "node": node_name, "status": "error", "error": "property must not be empty"}
 
