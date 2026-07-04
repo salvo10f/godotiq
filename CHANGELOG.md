@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.15] - 2026-07-04
+
+First release driven by a measured behavioral baseline instead of impressions: every item traces to a finding from the ShipBench v0 runs (0.5.13 = 6/9, 0.5.14 = 8/9 tasks passed; 9+9 real agent runs against a live editor). Two independent code reviews of this delta each caught one real defect before the tag — both fixed and regression-tested.
+
+**After upgrading, re-install the addon in your projects** (`pip install -U godotiq`, then `godotiq install-addon <project>` and restart the Godot editor): the add_child fix and the new node_ops operations live in the addon.
+
+### Fixed
+
+- **`add_child` inline `properties` are applied for real and verified per-property (P0).** `node_ops add_child` with `properties: {...}` answered `status: ok, verified: true` while silently discarding every property — the node landed on disk bare (reproduced deterministically on 0.5.13 AND 0.5.14; caused 2 of the 3 baseline T-UI failures and the T-3D "0 geometries" scene). Properties are now validated and converted BEFORE any undo/redo registration — a property that cannot apply fails that op with no node added (`PROPERTY_NOT_FOUND`/`PROPERTY_IS_NULL` teaching errors, parity with `set_property`; `properties["name"]` teaches the top-level `name` field) — and read back one by one after commit: `actual_properties` reports what stuck, a mismatch (e.g. a clamping setter like `ProgressBar.value`) downgrades the op to `unverified` with `unverified_properties`, while the node's presence still counts in `scene_modified`. 5 editor-headless contract tests, red on 0.5.14's addon.
+- **The `bundle_unavailable` hint points at the actual cause when the license key is missing.** State machine: Pro receipt within grace + NO key configured → bundle download → HTTP 401 → the hint said "Re-run with network access", sending operators to check the network when the problem was the missing key. Keyed on `bundle_error_detail: download_http_401` + `license_key_configured: false`, the hint now says the receipt is still valid but no key is configured: set `GODOTIQ_LICENSE_KEY` in the MCP client's env block and restart the client. With a key configured the 401 keeps the generic hint (a worker-side rejection is a different failure).
+
+### Added
+
+- **`node_ops` op `set_project_setting`** — whitelisted ProjectSettings writes with synchronous save and read-back. `application/run/main_scene` first among them (the measured need: baseline agents hand-rolled ProjectSettings GDScript through `exec` to set it), plus `application/config/name` and window size/stretch. `main_scene` must point at an existing `res://*.tscn` (`SCENE_NOT_FOUND` teaches saving first); non-whitelisted settings error with the allowed list and the `exec` alternative; results carry `verified` and `undoable: false` (project.godot is not part of the scene undo history).
+- **`node_ops` op `assign_resource`** — fills typed resource slots (shape/mesh/texture/script) from a built-in type (`{"type": "RectangleShape2D", "properties": {"size": [32, 32]}}` — each inline resource property is read back, never accepted silently) or a `res://` path. Teaching pre-flight errors: `RESOURCE_TYPE_MISMATCH` (the property declares the Resource class it takes), `RESOURCE_NOT_FOUND`, `RESOURCE_PROPERTY_NOT_FOUND`/`RESOURCE_PROPERTY_REJECTED`, and `RESOURCE_PROPERTIES_INVALID` — malformed `properties` payloads and the path+properties combination are refused loud (applying properties to a loaded `res://` resource would mutate every scene sharing that file; caught by independent review before tag). Property-op semantics under the instance-internal guard (editable-children overrides allowed). The `PROPERTY_IS_NULL` errors from `set_property` and `add_child` now teach this op instead of the `godotiq_exec` workaround.
+- **`godotiq_validate` warns on incomplete scene nodes (Pro).** New `incomplete_node` rule: Sprite2D/Sprite3D/TextureRect without `texture`, CollisionShape2D/CollisionShape3D without `shape`, MeshInstance3D without `mesh` — nodes that render or collide as nothing (the baseline failure mode where an agent shipped a sprite without ever attempting a texture). Instanced nodes and overrides are skipped (their properties may live in the source scene). `validate` now also accepts a `.tscn` target (previously "not a .gd script") and reports `total_scenes_checked`; the warning teaches `assign_resource`. Disableable like every rule via `conventions.disabled_rules`.
+
+### Internal
+
+- **ShipBench is now release gate §4.8**: every release runs the 3-task × 3-run behavioral benchmark against the published wheel and compares with the previous release. A regression opens an investigation of the failing runs, not an automatic rollback (n=3 is noisy by design). The bench runner gained `--resume-summary` to continue interrupted runs without re-paying completed ones.
+
 ## [0.5.14] - 2026-07-03
 
 R0 "Perception and contract" — the highest-leverage fixes from the July 2026 full-product audit: the model now actually SEES screenshots (MCP ImageContent instead of base64-in-JSON), the behavioral contract always reaches the model (MCP server instructions), the most frequent dead-end errors teach the next step, and existing-but-invisible capabilities are documented. Everything is additive or opt-out; no Pro bundle change (zero-delta).
