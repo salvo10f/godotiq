@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.16] - 2026-08-03
+
+Emergency compatibility release. `mcp` 2.0.0 (released 2026-07-28) removed the `mcp.server.fastmcp` module, and godotiq's dependency was uncapped (`mcp>=1.12.4`): every FRESH install of godotiq ≤0.5.15 now resolves mcp 2.0.0 and the server dies at startup with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` — while `godotiq --version` keeps working (it never imports the server), so the failure masquerades as a client connection problem. Reported by a customer (uvx on a new device, Windows 11, Claude Desktop, 2026-08-03) and reproduced end-to-end in a clean venv. Workaround on older versions until you upgrade: `uvx --with "mcp>=1.12.4,<2" godotiq`.
+
+### Fixed
+
+- **`mcp` dependency capped: `>=1.12.4,<2`.** mcp 2.0 renamed FastMCP to `MCPServer` and removed the old import path outright (not deprecated); upstream's own migration guide tells dependents to keep a `<2` upper bound until they have migrated, and 1.x stays in maintenance mode with security fixes. The 1.12.4 floor is unchanged. Verified: with the cap, a clean install resolves mcp 1.29.0 and every godotiq import path works. Migration to mcp 2.x is tracked as future work — upstream declares decorators, result wrapping, `Image`, `lifespan=` and `ctx.request_context.lifespan_context` unchanged, so the real work is nine import renames, the in-memory test helpers and camelCase→snake_case protocol fields (plus revalidating the private `_tool_manager` access, which still exists in 2.0 but remains private API).
+- **The startup crash now diagnoses itself.** If `mcp.server.fastmcp` cannot be imported anyway (`--no-deps` installs, hand-altered environments, module shadowing — a normal resolver can no longer get there past the cap), the server prints a `[godotiq] FATAL` line to stderr naming the installed mcp version and the exact fix command, ahead of the traceback.
+
+### Internal
+
+- New guard test `tests/test_dependency_constraints.py` pins the declared constraint: the `mcp` requirement must exclude 2.x and keep admitting the 1.12.4 floor — removing either bound turns the suite red.
+- `AGENTS.md`/`CLAUDE.md` dependency docs were stale (`mcp>=1.0.0`, predating 0.5.14's floor raise) — aligned to the real constraint, website content spec rows included.
+
 ## [0.5.15] - 2026-07-04
 
 First release driven by a measured behavioral baseline instead of impressions: every item traces to a finding from the ShipBench v0 runs (0.5.13 = 6/9, 0.5.14 = 8/9 tasks passed; 9+9 real agent runs against a live editor). Two independent code reviews of this delta each caught one real defect before the tag — both fixed and regression-tested.
